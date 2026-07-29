@@ -22,12 +22,13 @@
   .btn:disabled { opacity: .4; cursor: default; }
   .row { display: flex; align-items: center; gap: 8px; padding: 10px; border: 1px solid #e7e5e4; background: #fff; border-radius: 12px; margin-bottom: 8px; }
   .row.checked { border-color: #a7f3d0; background: #ecfdf5; }
-  .name { flex: 1; font-size: 14px; text-transform: capitalize; }
+  .name { font-size: 14px; text-transform: capitalize; }
   .name.done { text-decoration: line-through; color: #a8a29e; }
-  .qty { font-size: 12px; color: #57534e; min-width: 56px; text-align: center; }
+  .meta { font-size: 12px; color: #78716c; }
+  .qty { font-size: 12px; color: #57534e; min-width: 40px; text-align: center; }
   .ic { border: 0; background: none; cursor: pointer; color: #a8a29e; padding: 4px; font-size: 15px; line-height: 1; }
   .ic:hover { color: #44403c; }
-  .ic.del:hover { color: #ef4444; } .ic.link { color: #0284c7; }
+  .ic.del:hover { color: #ef4444; } .ic.link { color: #0284c7; text-decoration: none; }
   .check { width: 24px; height: 24px; border: 1px solid #d6d3d1; border-radius: 6px; background: none; cursor: pointer; color: #fff; }
   .check.on { background: #059669; border-color: #059669; }
   .empty { text-align: center; color: #a8a29e; font-size: 14px; padding: 40px 0; }
@@ -35,11 +36,13 @@
   .parsed-head { padding: 8px 12px; background: #f5f5f4; font-size: 12px; font-weight: 600; color: #78716c; text-transform: uppercase; }
   .pitem { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-top: 1px solid #f5f5f4; font-size: 14px; }
   .stock { font-size: 12px; color: #059669; font-weight: 500; }
-  .addbar { display: flex; gap: 8px; margin-bottom: 12px; }
+  .addbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
   .addbar input { padding: 8px 12px; border: 1px solid #d6d3d1; border-radius: 8px; font-size: 14px; }
   .actions { display: flex; gap: 8px; margin-top: 8px; }
   .err { color: #dc2626; font-size: 14px; margin-top: 8px; }
   .mt { margin-top: 12px; }
+  .bar { height: 5px; background: #e7e5e4; border-radius: 3px; overflow: hidden; width: 64px; }
+  .bar > i { display: block; height: 100%; background: #059669; }
 </style>
 </head>
 <body>
@@ -58,11 +61,20 @@
 const $ = (s, el=document) => el.querySelector(s);
 const api = (p, opt) => fetch("/api" + p, opt).then(r => r.json());
 const norm = s => s.toLowerCase().trim().replace(/s$/, "");
-const fmt = (q, u) => `${q}${u ? " " + u : ""}`;
-const wm = n => `https://www.walmart.com/search?q=${encodeURIComponent(n)}`;
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const wm = n => `https://www.walmart.com/search?q=${encodeURIComponent(n)}`;
+const J = o => ({ method: o.m, headers: { "content-type": "application/json" }, body: JSON.stringify(o.b) });
+
+function showBase(base, unit) {
+  if (unit === "count") return `${+base.toFixed(1)}`;
+  if (unit === "g") return base >= 1000 ? `${(base/1000).toFixed(2)} kg` : `${Math.round(base)} g`;
+  if (unit === "ml") return base >= 1000 ? `${(base/1000).toFixed(2)} L` : `${Math.round(base)} ml`;
+  return `${+base.toFixed(1)} ${unit}`;
+}
+function pkgsFromBase(base, pkgBase) { return pkgBase > 0 ? base / pkgBase : 0; }
 
 let tab = "recipe", pantry = [], list = [], parsed = null, rawRecipe = "", parsing = false, err = "";
+let shopping = false;
 
 async function refresh() {
   [pantry, list] = await Promise.all([api("/pantry"), api("/list")]);
@@ -77,14 +89,10 @@ document.querySelectorAll(".tab").forEach(b =>
   });
 
 function render() {
-  const v = $("#view");
-  if (tab === "recipe") v.innerHTML = recipeView();
-  else if (tab === "list") v.innerHTML = listView();
-  else v.innerHTML = pantryView();
+  $("#view").innerHTML = tab === "recipe" ? recipeView() : tab === "list" ? listView() : pantryView();
   wire();
 }
 
-// ---------- Recipe ----------
 function recipeView() {
   let html = `
     <textarea id="raw" placeholder="Paste a full recipe or just its ingredient list here…">${esc(rawRecipe)}</textarea>
@@ -92,15 +100,17 @@ function recipeView() {
       ${parsing ? "Reading recipe…" : "Extract ingredients"}</button>
     ${err ? `<p class="err">${esc(err)}</p>` : ""}`;
   if (parsed) {
-    html += `<div class="parsed"><div class="parsed-head">Found ${parsed.length} ingredient${parsed.length !== 1 ? "s" : ""} — uncheck any to skip</div>`;
+    html += `<div class="parsed"><div class="parsed-head">Found ${parsed.length} — “buy” is a real store package</div>`;
     parsed.forEach((p, i) => {
       const have = pantry.find(x => norm(x.name) === norm(p.name));
-      html += `<label class="pitem">
+      html += `<div class="pitem">
         <input type="checkbox" data-use="${i}" ${p.use ? "checked" : ""} style="accent-color:#059669;width:16px;height:16px" />
-        <span class="name" style="flex:1">${esc(p.name)}</span>
-        <span class="qty">${esc(fmt(p.qty, p.unit))}</span>
-        ${have ? `<span class="stock">in stock: ${esc(fmt(have.qty, have.unit))}</span>` : ""}
-      </label>`;
+        <span style="flex:1">
+          <span class="name">${esc(p.name)}</span><br>
+          <span class="meta">uses ${esc(p.use_qty)} ${esc(p.use_unit)} · buy ${esc(p.pkg_label)}</span>
+        </span>
+        ${have ? `<span class="stock">have ${showBase(have.base, have.base_unit)}</span>` : ""}
+      </div>`;
     });
     html += `<div class="actions" style="padding:12px;background:#fafaf9;border-top:1px solid #f5f5f4">
       <button class="btn btn-green" id="toList">Add needed → List</button>
@@ -110,49 +120,74 @@ function recipeView() {
   return html;
 }
 
-// ---------- List ----------
 function listView() {
   if (!list.length) return `<p class="empty">Nothing on the list yet. Add a recipe's ingredients from the Recipe tab.</p>`;
-  let html = list.map(it => `
+  let shop = shopping ? shopView() + `<div style="height:16px"></div>` : "";
+  let html = shop + list.map(it => `
     <div class="row ${it.checked ? "checked" : ""}">
       <button class="check ${it.checked ? "on" : ""}" data-check="${it.id}">${it.checked ? "✓" : ""}</button>
-      <span class="name ${it.checked ? "done" : ""}">${esc(it.name)}</span>
+      <span style="flex:1">
+        <span class="name ${it.checked ? "done" : ""}">${esc(it.name)}</span><br>
+        <span class="meta">${esc(it.pkg_label)}</span>
+      </span>
       <button class="ic" data-lqty="${it.id}" data-d="-1">−</button>
-      <span class="qty">${esc(fmt(it.qty, it.unit))}</span>
+      <span class="qty">${it.packages} ×</span>
       <button class="ic" data-lqty="${it.id}" data-d="1">+</button>
       <a class="ic link" href="${wm(it.name)}" target="_blank" rel="noreferrer" title="Find on Walmart">↗</a>
       <button class="ic del" data-ldel="${it.id}">🗑</button>
     </div>`).join("");
-  const unchecked = list.filter(x => !x.checked).map(x => x.name).join(" ");
   html += `<div class="actions">
     <button class="btn btn-green" id="purchase" ${list.some(x => x.checked) ? "" : "disabled"}>Mark checked as purchased → Pantry</button>
-    <a class="btn btn-sky" style="width:auto;padding:10px 16px;text-decoration:none;display:flex;align-items:center;justify-content:center"
-       href="${wm(unchecked)}" target="_blank" rel="noreferrer">🛒 Walmart</a>
-  </div>`;
+    <button class="btn btn-sky" id="shop" style="width:auto;padding:10px 16px" ${list.some(x => !x.checked) ? "" : "disabled"}>🛒 Shop on Walmart</button>
+  </div>
+  <p style="font-size:12px;color:#a8a29e;margin-top:8px;text-align:center">Buying adds the full package to your pantry stock.</p>`;
   return html;
 }
 
-// ---------- Pantry ----------
+function shopView() {
+  const items = list.filter(x => !x.checked);
+  let html = `<div class="parsed"><div class="parsed-head" style="display:flex;justify-content:space-between;align-items:center">
+    <span>Shopping — tap each to open its Walmart search</span>
+    <button class="ic" id="shopClose" style="font-size:18px">✕</button></div>`;
+  items.forEach(it => {
+    html += `<div class="pitem" style="justify-content:space-between">
+      <span style="flex:1"><span class="name">${esc(it.name)}</span> <span class="meta">${it.packages} × ${esc(it.pkg_label)}</span></span>
+      <a class="btn btn-sky" style="width:auto;padding:6px 14px;text-decoration:none" href="${wm(it.name)}" target="_blank" rel="noreferrer">Open ↗</a>
+      <button class="check" data-scheck="${it.id}" title="mark checked">✓</button>
+    </div>`;
+  });
+  html += `<div style="padding:10px 12px;background:#fafaf9;border-top:1px solid #f5f5f4;font-size:12px;color:#78716c">
+    Check items off as you add them to your Walmart cart.</div></div>`;
+  return html;
+}
+
 function pantryView() {
   let html = `<div class="addbar">
-    <input id="pname" placeholder="Item" style="flex:1" />
-    <input id="pqty" placeholder="Qty" type="number" style="width:64px" />
-    <input id="punit" placeholder="Unit" style="width:80px" />
+    <input id="pname" placeholder="Item" style="flex:1;min-width:120px" />
+    <input id="pamt" placeholder="Amount" type="number" style="width:90px" />
+    <select id="punit" style="padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:14px">
+      <option value="count">count</option><option value="g">g</option><option value="ml">ml</option>
+    </select>
     <button class="btn btn-dark" id="padd" style="width:auto;padding:0 14px">+</button>
   </div>`;
   if (!pantry.length) html += `<p class="empty">Pantry is empty. Purchased items land here automatically.</p>`;
-  else html += pantry.map(it => `
-    <div class="row">
-      <span class="name">${esc(it.name)}</span>
-      <button class="ic" data-pqty="${it.id}" data-d="-1">−</button>
-      <span class="qty">${esc(fmt(it.qty, it.unit))}</span>
-      <button class="ic" data-pqty="${it.id}" data-d="1">+</button>
+  else html += pantry.map(it => {
+    const pk = pkgsFromBase(it.base, it.pkg_base);
+    const pct = Math.max(0, Math.min(100, pk * 100 / Math.max(1, Math.ceil(pk))));
+    return `<div class="row">
+      <span style="flex:1">
+        <span class="name">${esc(it.name)}</span><br>
+        <span class="meta">${showBase(it.base, it.base_unit)} · ≈${pk.toFixed(1)} ${esc(it.pkg_label)}${pk === 1 ? "" : "s"}</span>
+      </span>
+      <span class="bar"><i style="width:${pct}%"></i></span>
+      <button class="ic" data-pqty="${it.id}" data-d="-1" title="use one package">−</button>
+      <button class="ic" data-pqty="${it.id}" data-d="1" title="add one package">+</button>
       <button class="ic del" data-pdel="${it.id}">🗑</button>
-    </div>`).join("");
+    </div>`;
+  }).join("");
   return html;
 }
 
-// ---------- events ----------
 function wire() {
   const raw = $("#raw"); if (raw) raw.oninput = e => rawRecipe = e.target.value;
   const ex = $("#extract"); if (ex) ex.onclick = extract;
@@ -162,24 +197,31 @@ function wire() {
 
   document.querySelectorAll("[data-check]").forEach(b => b.onclick = async () => {
     const it = list.find(x => x.id == b.dataset.check);
-    await api(`/list/${it.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ checked: !it.checked }) });
-    refresh();
+    await api(`/list/${it.id}`, J({ m: "PATCH", b: { checked: !it.checked } })); refresh();
   });
   document.querySelectorAll("[data-lqty]").forEach(b => b.onclick = async () => {
     const it = list.find(x => x.id == b.dataset.lqty);
-    const q = Math.max(0, +(it.qty + (+b.dataset.d)).toFixed(2));
-    await api(`/list/${it.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ qty: q }) });
-    refresh();
+    const p = Math.max(1, it.packages + (+b.dataset.d));
+    await api(`/list/${it.id}`, J({ m: "PATCH", b: { packages: p } })); refresh();
   });
   document.querySelectorAll("[data-ldel]").forEach(b => b.onclick = async () => { await api(`/list/${b.dataset.ldel}`, { method: "DELETE" }); refresh(); });
   const pu = $("#purchase"); if (pu) pu.onclick = async () => { await api("/purchase", { method: "POST" }); refresh(); };
+  const sh = $("#shop"); if (sh) sh.onclick = () => {
+    shopping = true;
+    const first = list.find(x => !x.checked);
+    if (first) window.open(wm(first.name), "_blank");
+    render();
+  };
+  const sc = $("#shopClose"); if (sc) sc.onclick = () => { shopping = false; render(); };
+  document.querySelectorAll("[data-scheck]").forEach(b => b.onclick = async () => {
+    await api(`/list/${b.dataset.scheck}`, J({ m: "PATCH", b: { checked: true } })); refresh();
+  });
 
   const pa = $("#padd"); if (pa) pa.onclick = addPantry;
   document.querySelectorAll("[data-pqty]").forEach(b => b.onclick = async () => {
     const it = pantry.find(x => x.id == b.dataset.pqty);
-    const q = Math.max(0, +(it.qty + (+b.dataset.d)).toFixed(2));
-    await api(`/pantry/${it.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ qty: q }) });
-    refresh();
+    const nb = Math.max(0, +(it.base + (+b.dataset.d) * it.pkg_base).toFixed(2));
+    await api(`/pantry/${it.id}`, J({ m: "PATCH", b: { base: nb } })); refresh();
   });
   document.querySelectorAll("[data-pdel]").forEach(b => b.onclick = async () => { await api(`/pantry/${b.dataset.pdel}`, { method: "DELETE" }); refresh(); });
 }
@@ -188,7 +230,7 @@ async function extract() {
   if (!rawRecipe.trim()) return;
   parsing = true; err = ""; parsed = null; render();
   try {
-    const r = await api("/parse", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ recipe: rawRecipe }) });
+    const r = await api("/parse", J({ m: "POST", b: { recipe: rawRecipe } }));
     if (r.error) throw new Error(r.error);
     parsed = r.items.map(x => ({ ...x, use: true }));
   } catch (e) {
@@ -199,14 +241,17 @@ async function extract() {
 }
 
 async function addToList() {
-  const chosen = parsed.filter(p => p.use);
-  for (const p of chosen) {
+  for (const p of parsed.filter(p => p.use)) {
     const have = pantry.find(x => norm(x.name) === norm(p.name));
-    const need = have ? Math.max(0, p.qty - have.qty) : p.qty;
-    if (need <= 0 && have) continue;
+    const haveBase = have ? have.base : 0;
+    const needBase = p.use_base - haveBase;
+    if (needBase <= 0) continue;
+    const packages = Math.max(1, Math.ceil(needBase / p.pkg_base));
     const existing = list.find(x => norm(x.name) === norm(p.name));
-    if (existing) await api(`/list/${existing.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ qty: +(existing.qty + (need || p.qty)).toFixed(2) }) });
-    else await api("/list", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: p.name, qty: need || p.qty, unit: p.unit }) });
+    if (existing) await api(`/list/${existing.id}`, J({ m: "PATCH", b: { packages: existing.packages + packages } }));
+    else await api("/list", J({ m: "POST", b: {
+      name: p.name, packages, base_unit: p.base_unit, pkg_label: p.pkg_label, pkg_base: p.pkg_base
+    }}));
   }
   parsed = null; rawRecipe = ""; tab = "list";
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "list"));
@@ -214,17 +259,17 @@ async function addToList() {
 }
 
 async function cook() {
-  const items = parsed.filter(p => p.use).map(p => ({ name: p.name, qty: p.qty }));
-  await api("/cook", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ items }) });
+  const items = parsed.filter(p => p.use).map(p => ({ name: p.name, use_base: p.use_base }));
+  await api("/cook", J({ m: "POST", b: { items } }));
   parsed = null; rawRecipe = ""; refresh();
 }
 
 async function addPantry() {
-  const name = $("#pname").value, qty = +$("#pqty").value || 1, unit = $("#punit").value;
+  const name = $("#pname").value, amt = +$("#pamt").value || 0, unit = $("#punit").value;
   if (!name.trim()) return;
   const existing = pantry.find(x => norm(x.name) === norm(name));
-  if (existing) await api(`/pantry/${existing.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ qty: +(existing.qty + qty).toFixed(2) }) });
-  else await api("/pantry", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, qty, unit }) });
+  if (existing) await api(`/pantry/${existing.id}`, J({ m: "PATCH", b: { base: +(existing.base + amt).toFixed(2) } }));
+  else await api("/pantry", J({ m: "POST", b: { name, base: amt, base_unit: unit, pkg_label: unit === "count" ? "each" : "1 pkg", pkg_base: amt || 1 } }));
   refresh();
 }
 
