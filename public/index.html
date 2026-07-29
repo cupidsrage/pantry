@@ -86,7 +86,7 @@ async function refresh() {
 
 document.querySelectorAll(".tab").forEach(b =>
   b.onclick = () => {
-    tab = b.dataset.tab; viewing = null;
+    tab = b.dataset.tab; viewing = null; err = "";
     document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t === b));
     render();
   });
@@ -134,9 +134,12 @@ function recipeView() {
         <div class="meta" style="font-weight:600;margin-bottom:6px">STEPS</div>
         <ol style="padding-left:18px;font-size:14px;line-height:1.5">${parsedSteps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>
       </div>`;
-    html += `<div class="actions" style="padding:12px;background:#fafaf9;border-top:1px solid #f5f5f4">
-      <button class="btn btn-green" id="toList">Add needed → List</button>
-      <button class="btn btn-dark" id="cook">Cooked it → subtract stock</button>
+    html += `<div style="padding:12px;background:#fafaf9;border-top:1px solid #f5f5f4">
+      <div class="actions" style="margin-top:0">
+        <button class="btn btn-green" id="toList">Add needed → List</button>
+        <button class="btn btn-sky" id="toListAll">Add all → List</button>
+      </div>
+      <button class="btn btn-dark" id="cook" style="margin-top:8px">Cooked it → subtract stock</button>
     </div></div>`;
   }
   return html;
@@ -197,9 +200,13 @@ function recipeDetailView() {
         </div>
         <ol style="padding-left:18px;font-size:14px;line-height:1.6">${r.steps.map(s => `<li style="margin-bottom:6px">${esc(s)}</li>`).join("")}</ol>
       </div>` : ""}
-      <div class="actions" style="padding:12px;background:#fafaf9;border-top:1px solid #f5f5f4">
-        <button class="btn btn-green" id="rToList">Add needed → List</button>
-        <button class="btn btn-dark" id="rCook">Cooked it → subtract stock</button>
+      ${err ? `<p class="err" style="padding:0 12px">${esc(err)}</p>` : ""}
+      <div style="padding:12px;background:#fafaf9;border-top:1px solid #f5f5f4">
+        <div class="actions" style="margin-top:0">
+          <button class="btn btn-green" id="rToList">Add needed → List</button>
+          <button class="btn btn-sky" id="rToListAll">Add all → List</button>
+        </div>
+        <button class="btn btn-dark" id="rCook" style="margin-top:8px">Cooked it → subtract stock</button>
       </div>
     </div>`;
 }
@@ -303,12 +310,13 @@ function wire() {
   const fu = $("#fromUrl"); if (fu) fu.onclick = () => extract({ url: recipeUrl });
   document.querySelectorAll("[data-use]").forEach(c => c.onchange = () => parsed[+c.dataset.use].use = c.checked);
   const tl = $("#toList"); if (tl) tl.onclick = () => addToList(parsed.filter(p => p.use));
+  const tla = $("#toListAll"); if (tla) tla.onclick = () => addToList(parsed.filter(p => p.use), true);
   const ck = $("#cook"); if (ck) ck.onclick = () => cook(parsed.filter(p => p.use));
   const sv = $("#save"); if (sv) sv.onclick = saveRecipe;
 
   // saved tab
   document.querySelectorAll("[data-open-recipe]").forEach(b => b.onclick = async () => {
-    viewing = await api(`/recipes/${b.dataset.openRecipe}`); servings = 1; cookStep = -1; render();
+    viewing = await api(`/recipes/${b.dataset.openRecipe}`); servings = 1; cookStep = -1; err = ""; render();
   });
   document.querySelectorAll("[data-rdel]").forEach(b => b.onclick = async () => {
     await api(`/recipes/${b.dataset.rdel}`, { method: "DELETE" }); refresh();
@@ -316,6 +324,7 @@ function wire() {
   const bk = $("#backSaved"); if (bk) bk.onclick = () => { viewing = null; render(); };
   const scaleItems = () => viewing.ingredients.map(i => ({ ...i, use_base: i.use_base * servings }));
   const rtl = $("#rToList"); if (rtl) rtl.onclick = () => addToList(scaleItems());
+  const rtla = $("#rToListAll"); if (rtla) rtla.onclick = () => addToList(scaleItems(), true);
   const rck = $("#rCook"); if (rck) rck.onclick = () => cook(scaleItems());
   const sd = $("#servDown"); if (sd) sd.onclick = () => { servings = Math.max(0.5, +(servings - 0.5).toFixed(1)); render(); };
   const su = $("#servUp"); if (su) su.onclick = () => { servings = +(servings + 0.5).toFixed(1); render(); };
@@ -391,18 +400,29 @@ async function saveRecipe() {
   render();
 }
 
-async function addToList(items) {
+async function addToList(items, ignoreStock = false) {
+  let added = 0, skipped = [];
   for (const p of items) {
     const have = pantry.find(x => norm(x.name) === norm(p.name));
-    const needBase = p.use_base - (have ? have.base : 0);
-    if (needBase <= 0) continue;
+    const needBase = ignoreStock ? p.use_base : p.use_base - (have ? have.base : 0);
+    if (needBase <= 0) { skipped.push(p.name); continue; }
     const packages = Math.max(1, Math.ceil(needBase / p.pkg_base));
     const existing = list.find(x => norm(x.name) === norm(p.name));
     if (existing) await api(`/list/${existing.id}`, J({ m: "PATCH", b: { packages: existing.packages + packages } }));
     else await api("/list", J({ m: "POST", b: {
       name: p.name, packages, base_unit: p.base_unit, pkg_label: p.pkg_label, pkg_base: p.pkg_base
     }}));
+    added++;
   }
+  if (added === 0) {
+    await refresh();
+    err = skipped.length
+      ? `Already stocked: ${skipped.join(", ")}. Use “Add all” to add them anyway.`
+      : "Nothing selected to add.";
+    render();
+    return;
+  }
+  err = "";
   parsed = null; rawRecipe = ""; recipeUrl = ""; viewing = null; tab = "list";
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "list"));
   refresh();
