@@ -53,6 +53,7 @@
     <button class="tab active" data-tab="recipe">Recipe</button>
     <button class="tab" data-tab="list">List</button>
     <button class="tab" data-tab="pantry">Pantry</button>
+    <button class="tab" data-tab="saved">Saved</button>
   </div>
   <div id="view"></div>
 </div>
@@ -74,33 +75,49 @@ function showBase(base, unit) {
 function pkgsFromBase(base, pkgBase) { return pkgBase > 0 ? base / pkgBase : 0; }
 
 let tab = "recipe", pantry = [], list = [], parsed = null, rawRecipe = "", parsing = false, err = "";
+let recipeUrl = "", parsedTitle = "", parsedSteps = [], parsedSource = "";
+let saved = [], viewing = null, servings = 1, cookStep = -1;
 let shopping = false;
 
 async function refresh() {
-  [pantry, list] = await Promise.all([api("/pantry"), api("/list")]);
+  [pantry, list, saved] = await Promise.all([api("/pantry"), api("/list"), api("/recipes")]);
   render();
 }
 
 document.querySelectorAll(".tab").forEach(b =>
   b.onclick = () => {
-    tab = b.dataset.tab;
+    tab = b.dataset.tab; viewing = null;
     document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t === b));
     render();
   });
 
 function render() {
-  $("#view").innerHTML = tab === "recipe" ? recipeView() : tab === "list" ? listView() : pantryView();
+  $("#view").innerHTML =
+    tab === "recipe" ? recipeView() :
+    tab === "list" ? listView() :
+    tab === "pantry" ? pantryView() :
+    savedView();
   wire();
 }
 
 function recipeView() {
   let html = `
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <input id="url" placeholder="Paste a recipe link (https://…)" value="${esc(recipeUrl)}"
+        style="flex:1;padding:10px 12px;border:1px solid #d6d3d1;border-radius:10px;font-size:14px" />
+      <button class="btn btn-dark" id="fromUrl" style="width:auto;padding:0 16px" ${parsing ? "disabled" : ""}>Fetch</button>
+    </div>
+    <p class="meta" style="text-align:center;margin-bottom:10px">— or paste the text below —</p>
     <textarea id="raw" placeholder="Paste a full recipe or just its ingredient list here…">${esc(rawRecipe)}</textarea>
     <button class="btn btn-green mt" id="extract" ${parsing ? "disabled" : ""}>
       ${parsing ? "Reading recipe…" : "Extract ingredients"}</button>
     ${err ? `<p class="err">${esc(err)}</p>` : ""}`;
   if (parsed) {
-    html += `<div class="parsed"><div class="parsed-head">Found ${parsed.length} — “buy” is a real store package</div>`;
+    html += `<div class="parsed">
+      <div class="parsed-head" style="display:flex;justify-content:space-between;align-items:center">
+        <span>${esc(parsedTitle || "Recipe")}</span>
+        <button class="btn btn-sky" id="save" style="width:auto;padding:5px 12px;font-size:12px">Save recipe</button>
+      </div>`;
     parsed.forEach((p, i) => {
       const have = pantry.find(x => norm(x.name) === norm(p.name));
       html += `<div class="pitem">
@@ -112,12 +129,103 @@ function recipeView() {
         ${have ? `<span class="stock">have ${showBase(have.base, have.base_unit)}</span>` : ""}
       </div>`;
     });
+    if (parsedSteps.length)
+      html += `<div style="padding:10px 12px;border-top:1px solid #f5f5f4">
+        <div class="meta" style="font-weight:600;margin-bottom:6px">STEPS</div>
+        <ol style="padding-left:18px;font-size:14px;line-height:1.5">${parsedSteps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>
+      </div>`;
     html += `<div class="actions" style="padding:12px;background:#fafaf9;border-top:1px solid #f5f5f4">
       <button class="btn btn-green" id="toList">Add needed → List</button>
       <button class="btn btn-dark" id="cook">Cooked it → subtract stock</button>
     </div></div>`;
   }
   return html;
+}
+
+// ---------- Saved recipes ----------
+function savedView() {
+  if (viewing) return recipeDetailView();
+  if (!saved.length) return `<p class="empty">No saved recipes yet. Parse one on the Recipe tab and tap “Save recipe”.</p>`;
+  return saved.map(r => `
+    <div class="row">
+      <span style="flex:1" data-open-recipe="${r.id}" role="button">
+        <span class="name">${esc(r.title)}</span><br>
+        <span class="meta">${r.source_url ? "from link" : "pasted"} · ${new Date(r.created).toLocaleDateString()}</span>
+      </span>
+      <button class="btn btn-sky" data-open-recipe="${r.id}" style="width:auto;padding:6px 14px">Open</button>
+      <button class="ic del" data-rdel="${r.id}">🗑</button>
+    </div>`).join("");
+}
+
+// pretty-print a possibly-fractional scaled quantity
+function niceQty(n) {
+  const r = Math.round(n * 100) / 100;
+  if (Number.isInteger(r)) return `${r}`;
+  const frac = { 0.25: "¼", 0.5: "½", 0.75: "¾", 0.33: "⅓", 0.67: "⅔" };
+  const whole = Math.floor(r), rem = Math.round((r - whole) * 100) / 100;
+  if (frac[rem]) return whole ? `${whole} ${frac[rem]}` : frac[rem];
+  return `${r}`;
+}
+
+function recipeDetailView() {
+  const r = viewing;
+  if (cookStep >= 0) return cookModeView();
+  return `
+    <button class="ic" id="backSaved" style="font-size:14px;margin-bottom:8px">← all recipes</button>
+    <div class="parsed">
+      <div class="parsed-head" style="display:flex;justify-content:space-between;align-items:center">
+        <span>${esc(r.title)}</span>
+        ${r.source_url ? `<a class="ic link" href="${esc(r.source_url)}" target="_blank" rel="noreferrer" style="font-size:12px">source ↗</a>` : ""}
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid #f5f5f4">
+        <span class="meta" style="font-weight:600">SERVINGS ×</span>
+        <button class="ic" id="servDown" style="font-size:18px;border:1px solid #d6d3d1;border-radius:8px;width:30px">−</button>
+        <span style="font-size:15px;min-width:28px;text-align:center;font-weight:600">${niceQty(servings)}</span>
+        <button class="ic" id="servUp" style="font-size:18px;border:1px solid #d6d3d1;border-radius:8px;width:30px">+</button>
+        ${servings !== 1 ? `<span class="meta">amounts scaled</span>` : ""}
+      </div>
+      <div style="padding:10px 12px">
+        <div class="meta" style="font-weight:600;margin-bottom:6px">INGREDIENTS</div>
+        <ul style="padding-left:18px;font-size:14px;line-height:1.6">
+          ${r.ingredients.map(i => `<li>${niceQty(i.use_qty * servings)} ${esc(i.use_unit)} ${esc(i.name)}</li>`).join("")}
+        </ul>
+      </div>
+      ${r.steps.length ? `<div style="padding:10px 12px;border-top:1px solid #f5f5f4">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span class="meta" style="font-weight:600">STEPS</span>
+          <button class="btn btn-sky" id="startCook" style="width:auto;padding:5px 14px;font-size:12px">▶ Start cooking</button>
+        </div>
+        <ol style="padding-left:18px;font-size:14px;line-height:1.6">${r.steps.map(s => `<li style="margin-bottom:6px">${esc(s)}</li>`).join("")}</ol>
+      </div>` : ""}
+      <div class="actions" style="padding:12px;background:#fafaf9;border-top:1px solid #f5f5f4">
+        <button class="btn btn-green" id="rToList">Add needed → List</button>
+        <button class="btn btn-dark" id="rCook">Cooked it → subtract stock</button>
+      </div>
+    </div>`;
+}
+
+function cookModeView() {
+  const r = viewing, n = r.steps.length, i = cookStep;
+  const last = i === n - 1;
+  return `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <span class="name" style="font-weight:600;font-size:16px">${esc(r.title)}</span>
+      <button class="ic" id="exitCook" style="font-size:18px">✕</button>
+    </div>
+    <div style="height:5px;background:#e7e5e4;border-radius:3px;margin-bottom:20px;overflow:hidden">
+      <div style="height:100%;background:#059669;width:${((i + 1) / n) * 100}%;transition:width .2s"></div>
+    </div>
+    <div class="meta" style="font-weight:600;margin-bottom:8px">STEP ${i + 1} OF ${n}</div>
+    <div style="font-size:22px;line-height:1.4;min-height:120px;padding:20px;background:#fff;border:1px solid #e7e5e4;border-radius:16px">
+      ${esc(r.steps[i])}
+    </div>
+    <div class="actions" style="margin-top:20px">
+      <button class="btn btn-dark" id="prevStep" ${i === 0 ? "disabled" : ""} style="flex:1">← Back</button>
+      ${last
+        ? `<button class="btn btn-green" id="finishCook" style="flex:2">Done — subtract stock ✓</button>`
+        : `<button class="btn btn-green" id="nextStep" style="flex:2">Next →</button>`}
+    </div>
+    <p style="font-size:12px;color:#a8a29e;margin-top:10px;text-align:center">Finishing subtracts this recipe's ingredients (×${niceQty(servings)}) from your pantry.</p>`;
 }
 
 function listView() {
@@ -190,10 +298,37 @@ function pantryView() {
 
 function wire() {
   const raw = $("#raw"); if (raw) raw.oninput = e => rawRecipe = e.target.value;
-  const ex = $("#extract"); if (ex) ex.onclick = extract;
+  const url = $("#url"); if (url) url.oninput = e => recipeUrl = e.target.value;
+  const ex = $("#extract"); if (ex) ex.onclick = () => extract({ recipe: rawRecipe });
+  const fu = $("#fromUrl"); if (fu) fu.onclick = () => extract({ url: recipeUrl });
   document.querySelectorAll("[data-use]").forEach(c => c.onchange = () => parsed[+c.dataset.use].use = c.checked);
-  const tl = $("#toList"); if (tl) tl.onclick = addToList;
-  const ck = $("#cook"); if (ck) ck.onclick = cook;
+  const tl = $("#toList"); if (tl) tl.onclick = () => addToList(parsed.filter(p => p.use));
+  const ck = $("#cook"); if (ck) ck.onclick = () => cook(parsed.filter(p => p.use));
+  const sv = $("#save"); if (sv) sv.onclick = saveRecipe;
+
+  // saved tab
+  document.querySelectorAll("[data-open-recipe]").forEach(b => b.onclick = async () => {
+    viewing = await api(`/recipes/${b.dataset.openRecipe}`); servings = 1; cookStep = -1; render();
+  });
+  document.querySelectorAll("[data-rdel]").forEach(b => b.onclick = async () => {
+    await api(`/recipes/${b.dataset.rdel}`, { method: "DELETE" }); refresh();
+  });
+  const bk = $("#backSaved"); if (bk) bk.onclick = () => { viewing = null; render(); };
+  const scaleItems = () => viewing.ingredients.map(i => ({ ...i, use_base: i.use_base * servings }));
+  const rtl = $("#rToList"); if (rtl) rtl.onclick = () => addToList(scaleItems());
+  const rck = $("#rCook"); if (rck) rck.onclick = () => cook(scaleItems());
+  const sd = $("#servDown"); if (sd) sd.onclick = () => { servings = Math.max(0.5, +(servings - 0.5).toFixed(1)); render(); };
+  const su = $("#servUp"); if (su) su.onclick = () => { servings = +(servings + 0.5).toFixed(1); render(); };
+  const start = $("#startCook"); if (start) start.onclick = () => { cookStep = 0; render(); };
+  const exit = $("#exitCook"); if (exit) exit.onclick = () => { cookStep = -1; render(); };
+  const prev = $("#prevStep"); if (prev) prev.onclick = () => { cookStep = Math.max(0, cookStep - 1); render(); };
+  const next = $("#nextStep"); if (next) next.onclick = () => { cookStep = Math.min(viewing.steps.length - 1, cookStep + 1); render(); };
+  const fin = $("#finishCook"); if (fin) fin.onclick = async () => {
+    await cook(scaleItems());
+    cookStep = -1; viewing = null; servings = 1; tab = "saved";
+    document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "saved"));
+    render();
+  };
 
   document.querySelectorAll("[data-check]").forEach(b => b.onclick = async () => {
     const it = list.find(x => x.id == b.dataset.check);
@@ -226,25 +361,40 @@ function wire() {
   document.querySelectorAll("[data-pdel]").forEach(b => b.onclick = async () => { await api(`/pantry/${b.dataset.pdel}`, { method: "DELETE" }); refresh(); });
 }
 
-async function extract() {
-  if (!rawRecipe.trim()) return;
+async function extract({ recipe, url }) {
+  if (!recipe?.trim() && !url?.trim()) return;
   parsing = true; err = ""; parsed = null; render();
   try {
-    const r = await api("/parse", J({ m: "POST", b: { recipe: rawRecipe } }));
+    const r = await api("/parse", J({ m: "POST", b: url?.trim() ? { url } : { recipe } }));
     if (r.error) throw new Error(r.error);
     parsed = r.items.map(x => ({ ...x, use: true }));
+    parsedTitle = r.title || "";
+    parsedSteps = r.steps || [];
+    parsedSource = r.source_url || "";
   } catch (e) {
-    err = "Couldn't read that recipe. Try pasting the ingredient list more cleanly.";
+    err = "Couldn't read that recipe. Check the link, or paste the text instead.";
   } finally {
     parsing = false; render();
   }
 }
 
-async function addToList() {
-  for (const p of parsed.filter(p => p.use)) {
+async function saveRecipe() {
+  await api("/recipes", J({ m: "POST", b: {
+    title: parsedTitle || "Untitled recipe",
+    source_url: parsedSource,
+    ingredients: parsed.map(({ use, ...rest }) => rest),
+    steps: parsedSteps,
+  }}));
+  await refresh();
+  tab = "saved"; viewing = null;
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "saved"));
+  render();
+}
+
+async function addToList(items) {
+  for (const p of items) {
     const have = pantry.find(x => norm(x.name) === norm(p.name));
-    const haveBase = have ? have.base : 0;
-    const needBase = p.use_base - haveBase;
+    const needBase = p.use_base - (have ? have.base : 0);
     if (needBase <= 0) continue;
     const packages = Math.max(1, Math.ceil(needBase / p.pkg_base));
     const existing = list.find(x => norm(x.name) === norm(p.name));
@@ -253,15 +403,15 @@ async function addToList() {
       name: p.name, packages, base_unit: p.base_unit, pkg_label: p.pkg_label, pkg_base: p.pkg_base
     }}));
   }
-  parsed = null; rawRecipe = ""; tab = "list";
+  parsed = null; rawRecipe = ""; recipeUrl = ""; viewing = null; tab = "list";
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "list"));
   refresh();
 }
 
-async function cook() {
-  const items = parsed.filter(p => p.use).map(p => ({ name: p.name, use_base: p.use_base }));
-  await api("/cook", J({ m: "POST", b: { items } }));
-  parsed = null; rawRecipe = ""; refresh();
+async function cook(items) {
+  await api("/cook", J({ m: "POST", b: { items: items.map(p => ({ name: p.name, use_base: p.use_base })) } }));
+  parsed = null; rawRecipe = ""; recipeUrl = "";
+  refresh();
 }
 
 async function addPantry() {

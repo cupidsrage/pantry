@@ -32,6 +32,14 @@ db.exec(`
     pkg_base REAL NOT NULL DEFAULT 1,
     checked INTEGER NOT NULL DEFAULT 0
   );
+  CREATE TABLE IF NOT EXISTS recipes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    source_url TEXT DEFAULT '',
+    ingredients TEXT NOT NULL,   -- JSON array of parsed ingredient objects
+    steps TEXT NOT NULL,         -- JSON array of step strings
+    created INTEGER NOT NULL
+  );
 `);
 
 // ---------- pantry API ----------
@@ -108,55 +116,111 @@ app.post("/api/cook", (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- recipe parsing (Anthropic proxied, key stays server-side) ----------
-app.post("/api/parse", async (req, res) => {
-  const { recipe } = req.body;
-  if (!recipe?.trim()) return res.status(400).json({ error: "recipe required" });
-  if (!process.env.ANTHROPIC_API_KEY)
-    return res.status(500).json({ error: "ANTHROPIC_API_KEY not set on the server" });
-  try {
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1000,
-        messages: [{
-          role: "user",
-          content: `You convert a recipe into grocery-shopping data. Return ONLY a JSON array, no prose, no markdown fences.
-
-For each ingredient, output an object:
-{
-  "name": string,              // singular generic grocery name, e.g. "flour", "garlic", "chicken breast"
-  "use_qty": number,           // amount the recipe uses
-  "use_unit": string,          // the recipe's unit: "tbsp","cup","clove","whole","g","oz", etc.
-  "base_unit": "g" | "ml" | "count",   // g for solids, ml for liquids, count for whole items (eggs, lemons)
-  "use_base": number,          // use_qty converted into base_unit (e.g. 1 tbsp flour -> 8 (g); 2 cloves garlic -> 2 (count); 1 lemon -> 1 (count))
-  "pkg_label": string,         // what you actually buy at the store, e.g. "5 lb bag", "head", "bunch", "1 lb", "stick", "each"
-  "pkg_base": number           // how much base_unit is in ONE package (e.g. 5 lb bag flour -> 2265 (g); head of garlic -> 10 (count); bunch parsley -> 30 (g); lemon -> 1 (count); stick butter -> 113 (g))
+// ---------- shared Anthropic call ----------
+async function callClaude(prompt, maxTokens = 2000) {
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: maxTokens,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+  const data = await r.json();
+  return (data.content || []).filter((i) => i.type === "text").map((i) => i.text).join("");
 }
 
-Rules:
-- Use realistic US grocery package sizes for pkg_base.
-- For whole items sold individually (lemon, egg, onion), base_unit="count", pkg_base=1, pkg_label="each".
-- For garlic, base_unit="count" (cloves), a head ~10 cloves, pkg_label="head".
-- Combine duplicate ingredients. Skip water and plain "salt/pepper to taste" with no measured amount.
+// strip a fetched HTML page down to readable text for the model
+function htmlToText(html) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&#\d+;/g, " ")
+    .replace(/\s+/g, " ")
+    .slice(0, 12000); // keep the prompt bounded
+}
+
+const PARSE_PROMPT = (recipeText) => `You extract a recipe into structured data. Return ONLY a JSON object, no prose, no markdown fences:
+{
+  "title": string,             // the recipe's name
+  "ingredients": [ {
+     "name": string,           // singular generic grocery name, e.g. "flour", "garlic", "chicken breast"
+     "use_qty": number,        // amount the recipe uses
+     "use_unit": string,       // recipe unit: "tbsp","cup","clove","whole","g","oz", etc.
+     "base_unit": "g" | "ml" | "count",   // g solids, ml liquids, count for whole items
+     "use_base": number,       // use_qty in base_unit (1 tbsp flour->8 g; 2 cloves garlic->2 count; 1 lemon->1 count)
+     "pkg_label": string,      // what you actually buy: "5 lb bag","head","bunch","1 lb","stick","each"
+     "pkg_base": number        // base_unit in ONE package (5 lb bag flour->2265 g; head garlic->10 count; bunch parsley->30 g; lemon->1 count; stick butter->113 g)
+  } ],
+  "steps": [ string ]          // ordered cooking steps, each a short plain sentence
+}
+Rules: realistic US package sizes for pkg_base. Whole items sold individually -> base_unit "count", pkg_base 1, pkg_label "each". Garlic -> count in cloves, head ~10. Combine duplicate ingredients. Skip water and plain salt/pepper "to taste" with no amount. If the text has no clear cooking steps, use an empty steps array.
 
 RECIPE:
-${recipe}`,
-        }],
-      }),
+${recipeText}`;
+
+// ---------- recipe parsing: accepts pasted text OR a url ----------
+app.post("/api/parse", async (req, res) => {
+  let { recipe, url } = req.body;
+  if (!process.env.ANTHROPIC_API_KEY)
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY not set on the server" });
+
+  try {
+    let sourceUrl = "";
+    if (url?.trim()) {
+      sourceUrl = url.trim();
+      let page;
+      try {
+        const pr = await fetch(sourceUrl, {
+          headers: { "user-agent": "Mozilla/5.0 (compatible; PantryApp/1.0)" },
+          redirect: "follow",
+        });
+        page = await pr.text();
+      } catch {
+        return res.status(400).json({ error: "Couldn't fetch that link." });
+      }
+      recipe = htmlToText(page);
+      if (recipe.length < 50) return res.status(400).json({ error: "That page didn't have readable recipe text." });
+    }
+    if (!recipe?.trim()) return res.status(400).json({ error: "recipe or url required" });
+
+    const text = (await callClaude(PARSE_PROMPT(recipe))).replace(/```json|```/g, "").trim();
+    const obj = JSON.parse(text);
+    res.json({
+      title: obj.title || "Untitled recipe",
+      items: obj.ingredients || [],
+      steps: obj.steps || [],
+      source_url: sourceUrl,
     });
-    const data = await r.json();
-    const text = (data.content || []).filter((i) => i.type === "text").map((i) => i.text).join("").replace(/```json|```/g, "").trim();
-    res.json({ items: JSON.parse(text) });
   } catch (e) {
     res.status(500).json({ error: "parse failed" });
   }
+});
+
+// ---------- saved recipes ----------
+app.get("/api/recipes", (_, res) =>
+  res.json(db.prepare("SELECT id,title,source_url,created FROM recipes ORDER BY created DESC").all()));
+app.get("/api/recipes/:id", (req, res) => {
+  const row = db.prepare("SELECT * FROM recipes WHERE id=?").get(req.params.id);
+  if (!row) return res.status(404).json({ error: "not found" });
+  res.json({ ...row, ingredients: JSON.parse(row.ingredients), steps: JSON.parse(row.steps) });
+});
+app.post("/api/recipes", (req, res) => {
+  const { title, source_url = "", ingredients = [], steps = [] } = req.body;
+  if (!title?.trim()) return res.status(400).json({ error: "title required" });
+  const info = db.prepare("INSERT INTO recipes (title,source_url,ingredients,steps,created) VALUES (?,?,?,?,?)")
+    .run(title.trim(), source_url, JSON.stringify(ingredients), JSON.stringify(steps), Date.now());
+  res.json({ id: info.lastInsertRowid });
+});
+app.delete("/api/recipes/:id", (req, res) => {
+  db.prepare("DELETE FROM recipes WHERE id=?").run(req.params.id);
+  res.json({ ok: true });
 });
 
 const PORT = process.env.PORT || 3000;
