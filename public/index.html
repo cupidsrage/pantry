@@ -401,37 +401,51 @@ async function saveRecipe() {
 }
 
 async function addToList(items, ignoreStock = false) {
-  let added = 0, skipped = [];
-  for (const p of items) {
-    const have = pantry.find(x => norm(x.name) === norm(p.name));
-    const needBase = ignoreStock ? p.use_base : p.use_base - (have ? have.base : 0);
-    if (needBase <= 0) { skipped.push(p.name); continue; }
-    const packages = Math.max(1, Math.ceil(needBase / p.pkg_base));
-    const existing = list.find(x => norm(x.name) === norm(p.name));
-    if (existing) await api(`/list/${existing.id}`, J({ m: "PATCH", b: { packages: existing.packages + packages } }));
-    else await api("/list", J({ m: "POST", b: {
-      name: p.name, packages, base_unit: p.base_unit, pkg_label: p.pkg_label, pkg_base: p.pkg_base
-    }}));
-    added++;
-  }
-  if (added === 0) {
-    await refresh();
-    err = skipped.length
-      ? `Already stocked: ${skipped.join(", ")}. Use “Add all” to add them anyway.`
-      : "Nothing selected to add.";
+  try {
+    if (!items || !items.length) { err = "No ingredients to add."; render(); return; }
+    let added = 0, skipped = [];
+    for (const p of items) {
+      const useBase = Number(p.use_base) || 0;
+      const pkgBase = Number(p.pkg_base) || 1;
+      const have = pantry.find(x => norm(x.name) === norm(p.name));
+      const needBase = ignoreStock ? useBase : useBase - (have ? have.base : 0);
+      if (needBase <= 0) { skipped.push(p.name); continue; }
+      const packages = Math.max(1, Math.ceil(needBase / pkgBase));
+      const existing = list.find(x => norm(x.name) === norm(p.name));
+      if (existing) await api(`/list/${existing.id}`, J({ m: "PATCH", b: { packages: existing.packages + packages } }));
+      else await api("/list", J({ m: "POST", b: {
+        name: p.name, packages, base_unit: p.base_unit || "count", pkg_label: p.pkg_label || "each", pkg_base: pkgBase
+      }}));
+      added++;
+    }
+    if (added === 0) {
+      await refresh();
+      err = skipped.length
+        ? `Already stocked: ${skipped.join(", ")}. Use “Add all” to add them anyway.`
+        : "Nothing selected to add.";
+      render();
+      return;
+    }
+    err = "";
+    parsed = null; rawRecipe = ""; recipeUrl = ""; viewing = null; tab = "list";
+    document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "list"));
+    refresh();
+  } catch (e) {
+    err = "Couldn't add to the list: " + (e && e.message ? e.message : e);
     render();
-    return;
   }
-  err = "";
-  parsed = null; rawRecipe = ""; recipeUrl = ""; viewing = null; tab = "list";
-  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "list"));
-  refresh();
 }
 
 async function cook(items) {
-  await api("/cook", J({ m: "POST", b: { items: items.map(p => ({ name: p.name, use_base: p.use_base })) } }));
-  parsed = null; rawRecipe = ""; recipeUrl = "";
-  refresh();
+  try {
+    await api("/cook", J({ m: "POST", b: { items: items.map(p => ({ name: p.name, use_base: p.use_base })) } }));
+    err = "";
+    parsed = null; rawRecipe = ""; recipeUrl = "";
+    refresh();
+  } catch (e) {
+    err = "Couldn't subtract stock: " + (e && e.message ? e.message : e);
+    render();
+  }
 }
 
 async function addPantry() {

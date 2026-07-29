@@ -42,6 +42,60 @@ db.exec(`
   );
 `);
 
+// ---------- migration ----------
+// Earlier versions of this app created `pantry`/`list` with a qty/unit schema.
+// CREATE TABLE IF NOT EXISTS won't alter an existing table, so a database from
+// an old deploy is missing the new columns. Detect that and rebuild.
+function columns(table) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+}
+function migrate() {
+  // list: needs `packages`; old schema had `qty`
+  const listCols = columns("list");
+  if (!listCols.includes("packages")) {
+    db.exec("ALTER TABLE list RENAME TO list_old");
+    db.exec(`CREATE TABLE list (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      packages REAL NOT NULL DEFAULT 1,
+      base_unit TEXT NOT NULL DEFAULT 'count',
+      pkg_label TEXT DEFAULT 'each',
+      pkg_base REAL NOT NULL DEFAULT 1,
+      checked INTEGER NOT NULL DEFAULT 0
+    )`);
+    // carry over names + checked state; old qty/unit don't map cleanly to packages, so default to 1 pkg
+    const oldCols = columns("list_old");
+    if (oldCols.includes("name")) {
+      const rows = db.prepare("SELECT * FROM list_old").all();
+      const ins = db.prepare("INSERT INTO list (name,packages,base_unit,pkg_label,pkg_base,checked) VALUES (?,?,?,?,?,?)");
+      for (const r of rows) ins.run(r.name, 1, "count", r.unit || "each", 1, r.checked ? 1 : 0);
+    }
+    db.exec("DROP TABLE list_old");
+  }
+  // pantry: needs `base`; old schema had `qty`
+  const pantryCols = columns("pantry");
+  if (!pantryCols.includes("base")) {
+    db.exec("ALTER TABLE pantry RENAME TO pantry_old");
+    db.exec(`CREATE TABLE pantry (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      base REAL NOT NULL DEFAULT 0,
+      base_unit TEXT NOT NULL DEFAULT 'count',
+      pkg_label TEXT DEFAULT 'each',
+      pkg_base REAL NOT NULL DEFAULT 1
+    )`);
+    const oldCols = columns("pantry_old");
+    if (oldCols.includes("name")) {
+      const rows = db.prepare("SELECT * FROM pantry_old").all();
+      const ins = db.prepare("INSERT INTO pantry (name,base,base_unit,pkg_label,pkg_base) VALUES (?,?,?,?,?)");
+      // old qty becomes base in a generic unit; pkg_base=1 so it still reads sensibly
+      for (const r of rows) ins.run(r.name, Number(r.qty) || 0, "count", r.unit || "each", 1);
+    }
+    db.exec("DROP TABLE pantry_old");
+  }
+}
+migrate();
+
 // ---------- pantry API ----------
 app.get("/api/pantry", (_, res) => res.json(db.prepare("SELECT * FROM pantry ORDER BY name").all()));
 app.post("/api/pantry", (req, res) => {
