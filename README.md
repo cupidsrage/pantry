@@ -22,3 +22,13 @@ npm install
 ANTHROPIC_API_KEY=sk-ant-... npm start
 # http://localhost:3000
 ```
+
+## Install on your phone (PWA)
+
+The app is a Progressive Web App — no app store needed.
+
+**iPhone/iPad (Safari):** open your Railway URL, tap the Share button, then "Add to Home Screen."
+
+**Android (Chrome):** open your Railway URL, tap the ⋮ menu, then "Install app" (or "Add to Home Screen").
+
+It then launches full-screen from your home screen with its own icon. Your data lives on the server, so it's the same list across every device you install it on. Needs an internet connection to load and sync (the shell is cached for fast open, but the pantry/list data is always live from the server).

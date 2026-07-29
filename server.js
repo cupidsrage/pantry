@@ -6,7 +6,15 @@ import { dirname, join } from "path";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json({ limit: "1mb" }));
-app.use(express.static(join(__dirname, "public")));
+app.use(
+  express.static(join(__dirname, "public"), {
+    setHeaders(res, path) {
+      if (path.endsWith(".webmanifest")) res.setHeader("Content-Type", "application/manifest+json");
+      // Let the service worker update promptly instead of being cached hard by the browser.
+      if (path.endsWith("sw.js")) res.setHeader("Cache-Control", "no-cache");
+    },
+  })
+);
 
 // ---------- database ----------
 // Railway wipes the container filesystem on redeploy. Mount a volume and set
