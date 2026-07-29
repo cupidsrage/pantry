@@ -208,6 +208,47 @@ function htmlToText(html) {
     .slice(0, 12000); // keep the prompt bounded
 }
 
+// Most recipe sites embed a schema.org/Recipe as JSON-LD. Pull it out directly
+// so we get clean ingredients/steps instead of guessing from page text.
+function extractRecipeJsonLd(html) {
+  const blocks = [...html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
+  const isRecipe = (o) => {
+    const t = o && o["@type"];
+    return t === "Recipe" || (Array.isArray(t) && t.includes("Recipe"));
+  };
+  const findRecipe = (data) => {
+    if (!data) return null;
+    if (Array.isArray(data)) { for (const d of data) { const r = findRecipe(d); if (r) return r; } return null; }
+    if (isRecipe(data)) return data;
+    if (data["@graph"]) return findRecipe(data["@graph"]);
+    return null;
+  };
+  for (const b of blocks) {
+    let data;
+    try { data = JSON.parse(b[1].trim()); } catch { continue; }
+    const r = findRecipe(data);
+    if (!r) continue;
+    // recipeInstructions can be strings, HowToStep objects, or HowToSection groups
+    const steps = [];
+    const walkInstr = (ins) => {
+      if (!ins) return;
+      if (typeof ins === "string") { steps.push(ins); return; }
+      if (Array.isArray(ins)) { ins.forEach(walkInstr); return; }
+      if (ins["@type"] === "HowToSection" && ins.itemListElement) { walkInstr(ins.itemListElement); return; }
+      if (ins.text) steps.push(ins.text);
+    };
+    walkInstr(r.recipeInstructions);
+    const ingredients = [].concat(r.recipeIngredient || r.ingredients || []);
+    const clean = (s) => String(s).replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
+    return {
+      name: r.name ? clean(r.name) : "",
+      ingredients: ingredients.map(clean).filter(Boolean),
+      instructions: steps.map(clean).filter(Boolean),
+    };
+  }
+  return null;
+}
+
 const PARSE_PROMPT = (recipeText) => `You extract a recipe into structured data. Return ONLY a JSON object, no prose, no markdown fences:
 {
   "title": string,             // the recipe's name
@@ -237,18 +278,45 @@ app.post("/api/parse", async (req, res) => {
     let sourceUrl = "";
     if (url?.trim()) {
       sourceUrl = url.trim();
-      let page;
+      let page, status;
       try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 12000); // don't hang forever
         const pr = await fetch(sourceUrl, {
-          headers: { "user-agent": "Mozilla/5.0 (compatible; PantryApp/1.0)" },
+          headers: {
+            "user-agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "accept-language": "en-US,en;q=0.9",
+          },
           redirect: "follow",
+          signal: ctrl.signal,
         });
+        clearTimeout(timer);
+        status = pr.status;
         page = await pr.text();
       } catch {
-        return res.status(400).json({ error: "Couldn't fetch that link." });
+        return res.status(400).json({ error: "Couldn't reach that link. Paste the recipe text instead." });
       }
-      recipe = htmlToText(page);
-      if (recipe.length < 50) return res.status(400).json({ error: "That page didn't have readable recipe text." });
+      if (status === 403 || status === 429 || status >= 500) {
+        return res.status(400).json({
+          error: "That site blocked the fetch (many big recipe sites do). Copy the recipe text and paste it instead.",
+        });
+      }
+
+      // Best path: most recipe sites embed the full recipe as schema.org JSON-LD.
+      const jsonld = extractRecipeJsonLd(page);
+      if (jsonld) {
+        recipe =
+          `TITLE: ${jsonld.name || ""}\n\nINGREDIENTS:\n` +
+          (jsonld.ingredients || []).join("\n") +
+          `\n\nINSTRUCTIONS:\n` +
+          (jsonld.instructions || []).join("\n");
+      } else {
+        recipe = htmlToText(page);
+      }
+      if (recipe.replace(/\s/g, "").length < 40)
+        return res.status(400).json({ error: "Couldn't find a recipe on that page. Paste the text instead." });
     }
     if (!recipe?.trim()) return res.status(400).json({ error: "recipe or url required" });
 
