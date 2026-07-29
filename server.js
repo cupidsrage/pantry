@@ -208,7 +208,88 @@ function htmlToText(html) {
     .slice(0, 12000); // keep the prompt bounded
 }
 
-// Most recipe sites embed a schema.org/Recipe as JSON-LD. Pull it out directly
+// Fetch a page's HTML. Tries a direct browser-style request first (free), and
+// falls back to a scraping service if the site blocks us AND SCRAPER_API_KEY is set.
+// Throws Error("blocked") when the page can't be retrieved by any available path.
+async function directFetch(url) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const r = await fetch(url, {
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "accept-language": "en-US,en;q=0.9",
+      },
+      redirect: "follow",
+      signal: ctrl.signal,
+    });
+    const body = await r.text();
+    return { status: r.status, body };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Provider-agnostic scraping. Set SCRAPER_URL to a template containing {url}
+// (and optionally {key}); the target URL is inserted URL-encoded. Examples:
+//   ScraperAPI:  https://api.scraperapi.com/?api_key={key}&render=true&url={url}
+//   ScrapingBee: https://app.scrapingbee.com/api/v1/?api_key={key}&url={url}
+//   any proxy:   https://example.com/get?token={key}&target={url}
+// SCRAPER_KEY holds the API key. If SCRAPER_URL isn't set but the legacy
+// SCRAPER_API_KEY is, default to the ScraperAPI template for backward compat.
+function scraperConfigured() {
+  return Boolean(process.env.SCRAPER_URL || process.env.SCRAPER_API_KEY);
+}
+function buildScraperEndpoint(url) {
+  const key = process.env.SCRAPER_KEY || process.env.SCRAPER_API_KEY || "";
+  const template =
+    process.env.SCRAPER_URL ||
+    "https://api.scraperapi.com/?api_key={key}&render=true&url={url}";
+  return template
+    .replace("{key}", encodeURIComponent(key))
+    .replace("{url}", encodeURIComponent(url));
+}
+async function scraperFetch(url) {
+  const endpoint = buildScraperEndpoint(url);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60000); // rendering can be slow
+  try {
+    const r = await fetch(endpoint, { signal: ctrl.signal });
+    const body = await r.text();
+    return { status: r.status, body };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const isBlocked = (status) => status === 403 || status === 429 || status === 401 || status >= 500;
+
+async function fetchPage(url) {
+  // 1) direct
+  let direct;
+  try {
+    direct = await directFetch(url);
+    if (!isBlocked(direct.status) && direct.body && direct.body.length > 200) return direct.body;
+  } catch {
+    /* fall through to scraper */
+  }
+  // 2) scraper fallback (only if configured)
+  if (scraperConfigured()) {
+    try {
+      const scraped = await scraperFetch(url);
+      if (!isBlocked(scraped.status) && scraped.body && scraped.body.length > 200) return scraped.body;
+    } catch {
+      /* fall through to error */
+    }
+  }
+  // if direct returned *something* usable despite a soft-block status, use it as last resort
+  if (direct && direct.body && direct.body.length > 200) return direct.body;
+  throw new Error("blocked");
+}
+
+
 // so we get clean ingredients/steps instead of guessing from page text.
 function extractRecipeJsonLd(html) {
   const blocks = [...html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
@@ -278,30 +359,15 @@ app.post("/api/parse", async (req, res) => {
     let sourceUrl = "";
     if (url?.trim()) {
       sourceUrl = url.trim();
-      let page, status;
+      let page;
       try {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 12000); // don't hang forever
-        const pr = await fetch(sourceUrl, {
-          headers: {
-            "user-agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "accept-language": "en-US,en;q=0.9",
-          },
-          redirect: "follow",
-          signal: ctrl.signal,
-        });
-        clearTimeout(timer);
-        status = pr.status;
-        page = await pr.text();
-      } catch {
-        return res.status(400).json({ error: "Couldn't reach that link. Paste the recipe text instead." });
-      }
-      if (status === 403 || status === 429 || status >= 500) {
-        return res.status(400).json({
-          error: "That site blocked the fetch (many big recipe sites do). Copy the recipe text and paste it instead.",
-        });
+        page = await fetchPage(sourceUrl);
+      } catch (e) {
+        const msg = e && e.message === "blocked"
+          ? "That site blocked the fetch. Paste the recipe text instead" +
+            (scraperConfigured() ? "." : ", or configure a scraper (SCRAPER_URL/SCRAPER_KEY) to fetch protected sites.")
+          : "Couldn't reach that link. Paste the recipe text instead.";
+        return res.status(400).json({ error: msg });
       }
 
       // Best path: most recipe sites embed the full recipe as schema.org JSON-LD.
@@ -371,5 +437,5 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29d" }));
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29d]`));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29f" }));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29f]`));
