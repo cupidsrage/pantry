@@ -244,9 +244,12 @@ function scraperConfigured() {
 }
 function buildScraperEndpoint(url) {
   const key = process.env.SCRAPER_KEY || process.env.SCRAPER_API_KEY || "";
+  // Default: ScraperAPI WITHOUT render — allrecipes & most recipe sites put the
+  // full recipe in the initial HTML as JSON-LD, so we want raw HTML, not the
+  // JS-rendered text (which strips tags and returns mostly navigation).
   const template =
     process.env.SCRAPER_URL ||
-    "https://api.scraperapi.com/?api_key={key}&render=true&url={url}";
+    "https://api.scraperapi.com/?api_key={key}&url={url}";
   return template
     .replace("{key}", encodeURIComponent(key))
     .replace("{url}", encodeURIComponent(url));
@@ -344,7 +347,7 @@ const PARSE_PROMPT = (recipeText) => `You extract a recipe into structured data.
   } ],
   "steps": [ string ]          // ordered cooking steps, each a short plain sentence
 }
-Rules: realistic US package sizes for pkg_base. Whole items sold individually -> base_unit "count", pkg_base 1, pkg_label "each". Garlic -> count in cloves, head ~10. Combine duplicate ingredients. Skip water and plain salt/pepper "to taste" with no amount. If the text has no clear cooking steps, use an empty steps array.
+Rules: realistic US package sizes for pkg_base. Whole items sold individually -> base_unit "count", pkg_base 1, pkg_label "each". Garlic -> count in cloves, head ~10. Combine duplicate ingredients. Skip water and plain salt/pepper "to taste" with no amount. If the text has no clear cooking steps, use an empty steps array. The text may include website navigation, ads, reviews, or comments — ignore all of that and extract only the actual recipe. If you truly cannot find a recipe, return {"title":"","ingredients":[],"steps":[]}.
 
 RECIPE:
 ${recipeText}`;
@@ -437,7 +440,7 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29g" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29h" }));
 
 // Diagnostic: /api/debug-fetch?url=... reports exactly what each fetch path does.
 // Safe to leave in — it never exposes your key, only whether one is present.
@@ -468,4 +471,4 @@ app.get("/api/debug-fetch", async (req, res) => {
   res.json(out);
 });
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29g]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29h]`));
