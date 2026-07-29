@@ -320,15 +320,32 @@ app.post("/api/parse", async (req, res) => {
     }
     if (!recipe?.trim()) return res.status(400).json({ error: "recipe or url required" });
 
-    const text = (await callClaude(PARSE_PROMPT(recipe))).replace(/```json|```/g, "").trim();
-    const obj = JSON.parse(text);
+    const raw = (await callClaude(PARSE_PROMPT(recipe))).replace(/```json|```/g, "").trim();
+    // The model should return only JSON, but guard against stray prose around it.
+    let obj;
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      const first = raw.indexOf("{"), last = raw.lastIndexOf("}");
+      if (first === -1 || last === -1) {
+        console.error("parse: model returned no JSON:", raw.slice(0, 200));
+        return res.status(422).json({ error: "The recipe reader returned an unexpected response. Try again, or paste cleaner text." });
+      }
+      try {
+        obj = JSON.parse(raw.slice(first, last + 1));
+      } catch (e2) {
+        console.error("parse: JSON still invalid:", raw.slice(0, 200));
+        return res.status(422).json({ error: "Couldn't read the recipe structure. Try again, or paste the ingredient list plainly." });
+      }
+    }
     res.json({
       title: obj.title || "Untitled recipe",
-      items: obj.ingredients || [],
-      steps: obj.steps || [],
+      items: Array.isArray(obj.ingredients) ? obj.ingredients : [],
+      steps: Array.isArray(obj.steps) ? obj.steps : [],
       source_url: sourceUrl,
     });
   } catch (e) {
+    console.error("parse failed:", e && e.message);
     res.status(500).json({ error: "parse failed" });
   }
 });
@@ -354,4 +371,5 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Pantry running on ${PORT}`));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29d" }));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29d]`));

@@ -383,6 +383,13 @@ async function extract({ recipe, url }) {
   try {
     const r = await api("/parse", J({ m: "POST", b: url?.trim() ? { url } : { recipe } }));
     if (r.error) throw new Error(r.error);
+    if (!r.items || r.items.length === 0) {
+      err = url?.trim()
+        ? "That link didn't give a usable recipe — the site may block automated reads. Paste the recipe text instead."
+        : "Couldn't find ingredients in that text. Make sure the ingredient list is included.";
+      parsed = null;
+      return;
+    }
     parsed = r.items.map(x => ({ ...x, use: true }));
     parsedTitle = r.title || "";
     parsedSteps = r.steps || [];
