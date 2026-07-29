@@ -437,5 +437,35 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29f" }));
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29f]`));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29g" }));
+
+// Diagnostic: /api/debug-fetch?url=... reports exactly what each fetch path does.
+// Safe to leave in — it never exposes your key, only whether one is present.
+app.get("/api/debug-fetch", async (req, res) => {
+  const url = req.query.url;
+  if (!url) return res.status(400).json({ error: "add ?url=..." });
+  const out = {
+    scraper_configured: scraperConfigured(),
+    has_SCRAPER_KEY: Boolean(process.env.SCRAPER_KEY),
+    has_SCRAPER_URL: Boolean(process.env.SCRAPER_URL),
+    has_legacy_SCRAPER_API_KEY: Boolean(process.env.SCRAPER_API_KEY),
+  };
+  try {
+    const d = await directFetch(url);
+    out.direct = { status: d.status, bytes: d.body ? d.body.length : 0, jsonld: Boolean(extractRecipeJsonLd(d.body)) };
+  } catch (e) {
+    out.direct = { error: String(e && e.message || e) };
+  }
+  if (scraperConfigured()) {
+    try {
+      const s = await scraperFetch(url);
+      out.scraper = { status: s.status, bytes: s.body ? s.body.length : 0, jsonld: Boolean(extractRecipeJsonLd(s.body)) };
+      out.scraper_body_head = (s.body || "").slice(0, 300);
+    } catch (e) {
+      out.scraper = { error: String(e && e.message || e) };
+    }
+  }
+  res.json(out);
+});
+
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29g]`));
