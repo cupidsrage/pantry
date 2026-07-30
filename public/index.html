@@ -130,8 +130,12 @@ function render() {
 function recipeView() {
   let html = `
     <div style="display:flex;gap:8px;margin-bottom:10px">
-      <input id="url" placeholder="Paste a recipe link (https://…)" value="${esc(recipeUrl)}"
-        style="flex:1;padding:10px 12px;border:1px solid #d6d3d1;border-radius:10px;font-size:14px" />
+      <div style="flex:1;position:relative;display:flex;align-items:center">
+        <input id="url" placeholder="Paste a recipe link (https://…)" value="${esc(recipeUrl)}"
+          style="width:100%;padding:10px 34px 10px 12px;border:1px solid #d6d3d1;border-radius:10px;font-size:14px" />
+        ${recipeUrl ? `<button id="urlClear" title="Clear link"
+          style="position:absolute;right:6px;border:0;background:#e7e5e4;color:#57534e;width:22px;height:22px;border-radius:50%;cursor:pointer;font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center">✕</button>` : ""}
+      </div>
       <button class="btn btn-dark" id="fromUrl" style="width:auto;padding:0 16px" ${parsing ? "disabled" : ""}>Fetch</button>
     </div>
     <p class="meta" style="text-align:center;margin-bottom:10px">— or paste the text below —</p>
@@ -332,7 +336,15 @@ function pantryView() {
 
 function wire() {
   const raw = $("#raw"); if (raw) raw.oninput = e => rawRecipe = e.target.value;
-  const url = $("#url"); if (url) url.oninput = e => recipeUrl = e.target.value;
+  const url = $("#url");
+  if (url) url.oninput = e => {
+    const was = recipeUrl.length > 0;
+    recipeUrl = e.target.value;
+    const now = recipeUrl.length > 0;
+    if (was !== now) { render(); const el = $("#url"); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }
+  };
+  const uc = $("#urlClear");
+  if (uc) uc.onclick = () => { recipeUrl = ""; render(); const el = $("#url"); if (el) el.focus(); };
   const ex = $("#extract"); if (ex) ex.onclick = () => extract({ recipe: rawRecipe });
   const fu = $("#fromUrl"); if (fu) fu.onclick = () => extract({ url: recipeUrl });
   document.querySelectorAll("[data-use]").forEach(c => c.onchange = () => parsed[+c.dataset.use].use = c.checked);
