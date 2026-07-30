@@ -410,10 +410,31 @@ function recipeDetailView() {
         ${servings !== 1 ? `<span class="meta">amounts scaled</span>` : ""}
       </div>
       <div style="padding:10px 12px">
-        <div class="meta" style="font-weight:600;margin-bottom:6px">INGREDIENTS</div>
-        <ul style="padding-left:18px;font-size:14px;line-height:1.6">
-          ${r.ingredients.map(i => `<li>${niceQty(i.use_qty * servings)} ${esc(i.use_unit)} ${esc(i.name)}</li>`).join("")}
-        </ul>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span class="meta" style="font-weight:600">INGREDIENTS</span>
+          <span class="meta">${(() => { const c = recipeCoverage(r); return `${c.have}/${c.total} on hand`; })()}</span>
+        </div>
+        <div style="font-size:14px;line-height:1.5">
+          ${r.ingredients.map(i => {
+            const needBase = (i.use_base || 0) * servings;
+            const haveBase = pantry.filter(x => norm(x.name) === norm(i.name)).reduce((s, x) => s + x.base, 0);
+            let dot, note = "";
+            if (needBase <= 0) { dot = "#d6d3d1"; }            // no tracked requirement
+            else if (haveBase >= needBase) { dot = "#059669"; note = `<span style="color:#059669;font-size:12px;margin-left:6px">✓ have</span>`; }
+            else if (haveBase > 0) {                            // partial
+              dot = "#d97706";
+              const pct = Math.round((haveBase / needBase) * 100);
+              note = `<span style="color:#d97706;font-size:12px;margin-left:6px">partial · have ${showBase(haveBase, i.base_unit)} of ${showBase(needBase, i.base_unit)} (${pct}%)</span>`;
+            } else {                                            // none
+              dot = "#a8a29e";
+              note = `<span style="color:#a8a29e;font-size:12px;margin-left:6px">need</span>`;
+            }
+            return `<div style="display:flex;align-items:baseline;gap:8px;padding:3px 0">
+              <span style="width:8px;height:8px;border-radius:50%;background:${dot};flex:none;transform:translateY(-1px)"></span>
+              <span style="flex:1">${niceQty(i.use_qty * servings)} ${esc(i.use_unit)} ${esc(i.name)}${note}</span>
+            </div>`;
+          }).join("")}
+        </div>
       </div>
       ${r.steps.length ? `<div style="padding:10px 12px;border-top:1px solid #f5f5f4">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
