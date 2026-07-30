@@ -70,6 +70,7 @@
       <button class="tab" data-tab="list">List</button>
       <button class="tab" data-tab="pantry">Pantry</button>
       <button class="tab" data-tab="saved">Saved</button>
+      <button class="tab" data-tab="plan">Plan</button>
     </div>
     <div id="view"></div>
   </div>
@@ -165,8 +166,146 @@ function groupedPantry() {
   return groups;
 }
 
+// ---------- meal plan ----------
+const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function ymd(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
+function weekStartOf(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); x.setDate(x.getDate() - x.getDay()); return x; }
+function addDays(d, n) { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
+function fmtTime(hhmm) { // "18:00" -> "6:00 PM"
+  if (!hhmm) return "";
+  const [h, m] = hhmm.split(":").map(Number);
+  const ap = h < 12 ? "AM" : "PM"; const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${String(m).padStart(2, "0")} ${ap}`;
+}
+function minutesToText(min) {
+  if (min <= 0) return "";
+  const h = Math.floor(min / 60), m = min % 60;
+  return h ? (m ? `${h}h ${m}m` : `${h}h`) : `${m}m`;
+}
+// Given a meal (with recipe + date + meal_time) return cooking/thaw reminders.
+function mealReminders(m) {
+  const out = { start: null, thaw: [] };
+  const r = m.recipe;
+  if (!r) return out;
+  const total = (r.prep_min || 0) + (r.cook_min || 0);
+
+  // Build the actual "eat" datetime from the planned date + time.
+  let eatAt = null;
+  if (m.date && m.meal_time) {
+    const [y, mo, d] = m.date.split("-").map(Number);
+    const [h, mn] = m.meal_time.split(":").map(Number);
+    eatAt = new Date(y, mo - 1, d, h, mn, 0, 0);
+  }
+
+  let cookStartAt = null;
+  if (eatAt && total > 0) {
+    cookStartAt = new Date(eatAt.getTime() - total * 60000);
+    out.start = fmtTime(`${String(cookStartAt.getHours()).padStart(2, "0")}:${String(cookStartAt.getMinutes()).padStart(2, "0")}`);
+    out.startMins = total;
+  }
+
+  // Thaw: any ingredient we have ONLY as frozen stock. Tell the user WHEN to pull
+  // it out so it's thawed by the time cooking starts (or by mealtime if no cook time).
+  const deadline = cookStartAt || eatAt;
+  for (const ing of (r.ingredients || [])) {
+    const batches = pantry.filter(x => norm(x.name) === norm(ing.name));
+    if (!batches.length) continue;
+    const stateOf = (b) => b.storage || (b.shelf_life && b.shelf_life.where) || "";
+    const allFrozen = batches.every(b => stateOf(b) === "freezer");
+    if (!allFrozen) continue; // have some non-frozen stock; no need to thaw more
+    // find a thaw_hours estimate from any batch that carries shelf_life
+    const th = batches.map(b => b.shelf_life && b.shelf_life.thaw_hours).find(v => typeof v === "number" && v > 0);
+    let when = "";
+    if (deadline && th) {
+      const thawBy = new Date(deadline.getTime() - th * 3600000);
+      when = ` by ${thawWhenText(thawBy)}`;
+    } else if (th) {
+      when = ` (needs ~${th >= 24 ? Math.round(th / 24) + "d" : th + "h"})`;
+    }
+    out.thaw.push(esc(ing.name) + when);
+  }
+  return out;
+}
+
+// "today 3:00 PM", "tomorrow 6:00 AM", "Fri 8:00 PM" — relative to now.
+function thawWhenText(dt) {
+  const now = new Date();
+  const startOfDay = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
+  const dayDiff = Math.round((startOfDay(dt) - startOfDay(now)) / 86400000);
+  const t = fmtTime(`${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`);
+  if (dayDiff < 0) return `now (already past — thaw ASAP)`;
+  if (dayDiff === 0) return `today ${t}`;
+  if (dayDiff === 1) return `tomorrow ${t}`;
+  return `${DOW[dt.getDay()]} ${t}`;
+}
+
+function planView() {
+  if (!planWeekStart) planWeekStart = weekStartOf(new Date());
+  const ws = planWeekStart;
+  const we = addDays(ws, 6);
+  const todayY = ymd(new Date());
+  const label = `${MON[ws.getMonth()]} ${ws.getDate()} – ${MON[we.getMonth()]} ${we.getDate()}`;
+  let html = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <button class="ic" id="planPrev" style="border:1px solid #d6d3d1;border-radius:8px;padding:4px 10px">←</button>
+      <span style="font-weight:600;font-size:15px">${label}</span>
+      <button class="ic" id="planNext" style="border:1px solid #d6d3d1;border-radius:8px;padding:4px 10px">→</button>
+    </div>`;
+  if (!saved.length)
+    html += `<p class="meta" style="text-align:center;margin-bottom:10px">Tip: save recipes first, then add them to days here.</p>`;
+
+  for (let i = 0; i < 7; i++) {
+    const day = addDays(ws, i);
+    const dY = ymd(day);
+    const isToday = dY === todayY;
+    const dayMeals = meals.filter(m => m.date === dY);
+    html += `<div style="border:1px solid ${isToday ? "#059669" : "#e7e5e4"};border-radius:12px;padding:10px 12px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-weight:600;font-size:14px">${DOW[day.getDay()]} ${day.getDate()}${isToday ? ` <span style="color:#059669;font-size:11px">• today</span>` : ""}</span>
+        <button class="ic" data-planadd="${dY}" style="border:1px solid #d6d3d1;border-radius:8px;padding:2px 10px;font-size:13px">+ meal</button>
+      </div>`;
+
+    for (const m of dayMeals) {
+      const rem = mealReminders(m);
+      html += `<div style="margin-top:8px;padding:8px;background:#fafaf9;border-radius:8px">
+        <div style="display:flex;justify-content:space-between;align-items:start;gap:8px">
+          <div style="flex:1">
+            <span style="font-weight:600;font-size:14px">${esc(m.title)}</span>
+            ${m.meal_time ? `<span class="meta"> · eat ${fmtTime(m.meal_time)}</span>` : ""}
+            ${m.recipe && (m.recipe.prep_min || m.recipe.cook_min) ? `<br><span class="meta">${m.recipe.prep_min ? `prep ${minutesToText(m.recipe.prep_min)}` : ""}${m.recipe.prep_min && m.recipe.cook_min ? " · " : ""}${m.recipe.cook_min ? `cook ${minutesToText(m.recipe.cook_min)}` : ""}</span>` : ""}
+            ${rem.start ? `<br><span class="meta" style="color:#0284c7;font-weight:600">▶ start cooking ~${rem.start}</span>` : ""}
+            ${rem.thaw.length ? `<br><span class="meta" style="color:#d97706;font-weight:600">❄ thaw ahead: ${rem.thaw.join(", ")}</span>` : ""}
+          </div>
+          <button class="ic del" data-mealdel="${m.id}" style="flex:none">🗑</button>
+        </div>
+        ${m.recipe ? `<button class="btn btn-sky" data-mealopen="${m.recipe.id}" style="width:auto;padding:3px 10px;font-size:12px;margin-top:6px">Open recipe</button>` : ""}
+      </div>`;
+    }
+
+    if (planAddDay === dY) {
+      const opts = saved.map(r => `<option value="${r.id}">${esc(r.title)}</option>`).join("");
+      html += `<div style="margin-top:8px;padding:8px;background:#eff6ff;border-radius:8px">
+        <select id="planRecipeSel" style="width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:14px;margin-bottom:6px">
+          <option value="">— pick a saved recipe —</option>${opts}
+        </select>
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+          <span class="meta">eat at</span>
+          <input id="planTime" type="time" value="${planAddTime}" style="padding:6px;border:1px solid #d6d3d1;border-radius:8px;font-size:14px" />
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-green" id="planSave" style="flex:1">Add to ${DOW[day.getDay()]}</button>
+          <button class="btn btn-dark" id="planCancel" style="width:auto;padding:0 14px">✕</button>
+        </div>
+      </div>`;
+    }
+    html += `</div>`;
+  }
+  return html;
+}
+
 let tab = "recipe", pantry = [], list = [], parsed = null, rawRecipe = "", parsing = false, err = "";
-let recipeUrl = "", parsedTitle = "", parsedSteps = [], parsedSource = "", parsedNutrition = null, parsedPhotos = [];
+let recipeUrl = "", parsedTitle = "", parsedSteps = [], parsedSource = "", parsedNutrition = null, parsedPhotos = [], parsedPrep = 0, parsedCook = 0;
 let saved = [], viewing = null, servings = 1, cookStep = -1;
 let shopping = false;
 let recipeMode = "import";  // "import" (link/paste), "manual", or "photo"
@@ -176,6 +315,10 @@ let photoImages = [];         // multiple pages: [{base64, mediaType, dataUrl}]
 let savedSort = "recent";     // "recent" | "az" | "canmake" | "expiring"
 let showPhotos = false;       // detail view: original photos expanded
 let shareOpen = false, shareMsg = "", shareMsgTone = "#059669";
+let meals = [];               // planned meals for the visible week
+let planWeekStart = null;     // Date (local) of the Sunday starting the shown week
+let planAddDay = null;        // 'YYYY-MM-DD' of the day whose add-form is open
+let planAddTime = "18:00", planAddRecipe = "";
 let lightbox = null;          // data URL of a photo shown full-screen, or null
 let pantryPhotoBusy = false, pantryPending = null;
 let receiptBusy = false, receiptItems = null;
@@ -189,11 +332,27 @@ async function refresh() {
   render();
 }
 
+async function loadMeals() {
+  if (!planWeekStart) planWeekStart = weekStartOf(new Date());
+  const from = ymd(planWeekStart), to = ymd(addDays(planWeekStart, 6));
+  const r = await api(`/meals?from=${from}&to=${to}`);
+  meals = Array.isArray(r) ? r : [];
+  render();
+}
+
+async function savePlanMeal() {
+  if (!planAddRecipe) { err = "Pick a recipe."; render(); return; }
+  await api("/meals", J({ m: "POST", b: { date: planAddDay, meal_time: planAddTime, recipe_id: +planAddRecipe } }));
+  planAddDay = null; err = "";
+  loadMeals();
+}
+
 document.querySelectorAll(".tab").forEach(b =>
   b.onclick = () => {
     tab = b.dataset.tab; viewing = null; err = "";
     document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t === b));
-    render();
+    if (tab === "plan") { planAddDay = null; loadMeals(); }
+    else render();
   });
 
 function render() {
@@ -201,6 +360,7 @@ function render() {
     (tab === "recipe" ? recipeView() :
     tab === "list" ? listView() :
     tab === "pantry" ? pantryView() :
+    tab === "plan" ? planView() :
     savedView()) + lightboxHtml();
   wire();
 }
@@ -448,6 +608,11 @@ function recipeDetailView() {
         <button class="ic" id="servUp" style="font-size:18px;border:1px solid #d6d3d1;border-radius:8px;width:30px">+</button>
         ${servings !== 1 ? `<span class="meta">amounts scaled</span>` : ""}
       </div>
+      ${(r.prep_min || r.cook_min) ? `<div style="display:flex;gap:16px;padding:8px 12px;border-bottom:1px solid #f5f5f4">
+        ${r.prep_min ? `<span class="meta">🔪 prep ${minutesToText(r.prep_min)}</span>` : ""}
+        ${r.cook_min ? `<span class="meta">🔥 cook ${minutesToText(r.cook_min)}</span>` : ""}
+        <span class="meta" style="font-weight:600">total ${minutesToText((r.prep_min || 0) + (r.cook_min || 0))}</span>
+      </div>` : ""}
       <div style="padding:10px 12px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
           <span class="meta" style="font-weight:600">INGREDIENTS</span>
@@ -708,6 +873,24 @@ function wire() {
   const ck = $("#cook"); if (ck) ck.onclick = () => cookEdited();
   const sv = $("#save"); if (sv) sv.onclick = saveRecipe;
 
+  // plan tab
+  const plPrev = $("#planPrev"); if (plPrev) plPrev.onclick = () => { planWeekStart = addDays(planWeekStart, -7); planAddDay = null; loadMeals(); };
+  const plNext = $("#planNext"); if (plNext) plNext.onclick = () => { planWeekStart = addDays(planWeekStart, 7); planAddDay = null; loadMeals(); };
+  document.querySelectorAll("[data-planadd]").forEach(b => b.onclick = () => { planAddDay = b.dataset.planadd; planAddRecipe = ""; render(); });
+  const prs = $("#planRecipeSel"); if (prs) prs.onchange = () => { planAddRecipe = prs.value; };
+  const plt = $("#planTime"); if (plt) plt.oninput = () => { planAddTime = plt.value; };
+  const pls = $("#planSave"); if (pls) pls.onclick = savePlanMeal;
+  const plc = $("#planCancel"); if (plc) plc.onclick = () => { planAddDay = null; render(); };
+  document.querySelectorAll("[data-mealdel]").forEach(b => b.onclick = async () => {
+    await api(`/meals/${b.dataset.mealdel}`, { method: "DELETE" }); loadMeals();
+  });
+  document.querySelectorAll("[data-mealopen]").forEach(b => b.onclick = async () => {
+    viewing = await api(`/recipes/${b.dataset.mealopen}`); servings = 1; cookStep = -1; showPhotos = false; shareOpen = false; shareMsg = ""; err = "";
+    tab = "saved";
+    document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "saved"));
+    render();
+  });
+
   // saved tab
   document.querySelectorAll("[data-sort]").forEach(b => b.onclick = () => { savedSort = b.dataset.sort; render(); });
   document.querySelectorAll("[data-open-recipe]").forEach(b => b.onclick = async () => {
@@ -830,7 +1013,7 @@ async function extract({ recipe, url }) {
     parsedTitle = r.title || "";
     parsedSteps = r.steps || [];
     parsedSource = r.source_url || "";
-    parsedNutrition = r.nutrition || null;
+    parsedNutrition = r.nutrition || null; parsedPrep = r.prep_min || 0; parsedCook = r.cook_min || 0;
     parsedPhotos = [];
     parsedDirty = false;
   } catch (e) {
@@ -927,7 +1110,7 @@ async function addPhotoPage(file) {
       parsedTitle = r.title || "";
       parsedSteps = r.steps || [];
       parsedSource = "";
-      parsedNutrition = r.nutrition || null;
+      parsedNutrition = r.nutrition || null; parsedPrep = r.prep_min || 0; parsedCook = r.cook_min || 0;
       parsedPhotos = [dataUrl]; // the PDF itself, opened via the source link
       parsedDirty = false;
       photoImages = [];
@@ -960,7 +1143,7 @@ async function readPhotoPages() {
     parsedTitle = r.title || "";
     parsedSteps = r.steps || [];
     parsedSource = "";
-    parsedNutrition = r.nutrition || null;
+    parsedNutrition = r.nutrition || null; parsedPrep = r.prep_min || 0; parsedCook = r.cook_min || 0;
     parsedPhotos = photoImages.map(im => im.dataUrl); // keep originals to store with the recipe
     parsedDirty = false;
     photoImages = [];
@@ -988,6 +1171,8 @@ async function saveManualRecipe() {
       ingredients: r.items,
       steps,
       nutrition: r.nutrition || null,
+      prep_min: r.prep_min || 0,
+      cook_min: r.cook_min || 0,
     }}));
     manualName = ""; manualIngredients = ""; manualDirections = "";
     await refresh();
@@ -1025,6 +1210,8 @@ async function saveRecipe() {
     steps: parsedSteps,
     nutrition: parsedNutrition,
     photos: parsedPhotos,
+    prep_min: parsedPrep,
+    cook_min: parsedCook,
   }}));
   await refresh();
   tab = "saved"; viewing = null;

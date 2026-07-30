@@ -61,6 +61,15 @@ db.exec(`
     user_id INTEGER NOT NULL,
     created INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS meal_plan (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    date TEXT NOT NULL,          -- 'YYYY-MM-DD' local day the meal is planned for
+    meal_time TEXT DEFAULT '',   -- 'HH:MM' target time to eat (optional)
+    recipe_id INTEGER,           -- saved recipe, or null for a free-text note
+    title TEXT NOT NULL,         -- snapshot of the recipe title (survives recipe deletion)
+    created INTEGER NOT NULL
+  );
 `);
 
 // ---------- migration ----------
@@ -123,6 +132,9 @@ function migrate() {
   if (!columns("recipes").includes("photos")) {
     db.exec("ALTER TABLE recipes ADD COLUMN photos TEXT DEFAULT ''");
   }
+  // recipes: estimated prep & cook time (minutes) for schedule "start cooking" math
+  if (!columns("recipes").includes("prep_min")) db.exec("ALTER TABLE recipes ADD COLUMN prep_min INTEGER DEFAULT 0");
+  if (!columns("recipes").includes("cook_min")) db.exec("ALTER TABLE recipes ADD COLUMN cook_min INTEGER DEFAULT 0");
   // pantry: expiration tracking — when it was added, how it's stored, and the
   // per-storage shelf life (JSON: {pantry,fridge,freezer,thawed} in days).
   const pc = columns("pantry");
@@ -541,17 +553,19 @@ function extractRecipeJsonLd(html) {
 // Keys: n=name, q=use_qty, u=use_unit, b=base_unit, ub=use_base, pl=pkg_label, pb=pkg_base
 // srv=servings the recipe makes, cal/pro/carb/fat = per-serving nutrition estimate
 const PARSE_PROMPT = (recipeText, includeSteps) => `Extract this recipe as MINIFIED JSON. Return ONLY the JSON, no prose, no markdown, no whitespace/newlines between tokens.
-Shape: {"t":title,"srv":servings,"cal":kcal,"pro":g,"carb":g,"fat":g,"i":[{"n":name,"q":use_qty,"u":unit,"b":base_unit,"ub":use_base,"pl":pkg_label,"pb":pkg_base}]${includeSteps ? ',"s":[step,...]' : ""}}
+Shape: {"t":title,"srv":servings,"cal":kcal,"pro":g,"carb":g,"fat":g,"prep":min,"cook":min,"i":[{"n":name,"q":use_qty,"u":unit,"b":base_unit,"ub":use_base,"pl":pkg_label,"pb":pkg_base}]${includeSteps ? ',"s":[step,...]' : ""}}
 Field meaning:
 - srv: how many servings the recipe makes (estimate a sensible number if not stated)
 - cal/pro/carb/fat: estimated nutrition PER SERVING — calories (kcal), protein (g), carbs (g), fat (g), whole numbers
+- prep: estimated hands-on prep time in MINUTES (chopping, mixing, assembling) before cooking
+- cook: estimated cooking time in MINUTES (baking/simmering/frying). Use printed times if present, else estimate. 0 for no-cook recipes.
 - n: singular generic grocery name ("flour","garlic","chicken breast")
 - q: amount recipe uses (number); u: its unit ("tbsp","cup","clove","whole","g","oz")
 - b: "g" (solids) | "ml" (liquids) | "count" (whole items)
 - ub: q converted to b (1 tbsp flour=8 g; 2 cloves garlic=2 count; 1 lemon=1 count)
 - pl: what you buy ("5 lb bag","head","bunch","1 lb","stick","each")
 - pb: amount of b in ONE package (5 lb bag flour=2265; head garlic=10; bunch parsley=30; lemon=1; stick butter=113)
-${includeSteps ? "- s: ordered cooking steps, each a short plain sentence\n" : ""}Rules: realistic US package sizes. Whole items sold individually -> b "count", pb 1, pl "each". Garlic -> count in cloves, head ~10. Combine duplicates. Skip water and plain salt/pepper "to taste". Nutrition is a reasonable estimate from the ingredients, not a lab value. Ignore any site navigation/ads/reviews in the text. If no recipe found, return {"t":"","i":[]}.
+${includeSteps ? "- s: ordered cooking steps, each a short plain sentence\n" : ""}Rules: realistic US package sizes. Whole items sold individually -> b "count", pb 1, pl "each". Garlic -> count in cloves, head ~10. Combine duplicates. Skip water and plain salt/pepper "to taste". Nutrition and times are reasonable estimates, not lab values. Ignore any site navigation/ads/reviews in the text. If no recipe found, return {"t":"","i":[]}.
 
 RECIPE:
 ${recipeText}`;
@@ -567,6 +581,8 @@ function expandParsed(obj, fallbackSteps) {
     title: obj.t || "Untitled recipe",
     servings: num(obj.srv) || null,
     nutrition,
+    prep_min: Math.max(0, Math.round(num(obj.prep) || 0)),
+    cook_min: Math.max(0, Math.round(num(obj.cook) || 0)),
     ingredients: items.map((x) => ({
       name: x.n,
       use_qty: x.q,
@@ -687,12 +703,13 @@ app.post("/api/receipt", requireAuth, async (req, res) => {
 // ---------- shelf-life estimation ----------
 // Given item names, estimate typical shelf life (days) for each storage state,
 // plus the usual place you'd store it. Uses the cheap text model.
-const SHELF_PROMPT = (names) => `For each grocery item, estimate typical shelf life in DAYS for each storage state, and where it's usually kept. Return ONLY MINIFIED JSON, no prose.
-Shape: {"r":[{"n":name,"where":"pantry"|"fridge"|"freezer","pantry":days,"fridge":days,"freezer":days,"thawed":days}]}
+const SHELF_PROMPT = (names) => `For each grocery item, estimate typical shelf life in DAYS for each storage state, where it's usually kept, and how long it takes to thaw. Return ONLY MINIFIED JSON, no prose.
+Shape: {"r":[{"n":name,"where":"pantry"|"fridge"|"freezer","pantry":days,"fridge":days,"freezer":days,"thawed":days,"thaw_hours":hours}]}
 - where: the normal place to store this item unopened (dry goods->pantry, dairy/produce/meat->fridge, ice cream->freezer)
 - pantry/fridge/freezer: shelf life in that state from today, in days. Use null if that state doesn't apply (e.g. milk has no meaningful pantry life; flour has no freezer need but you may still give one).
 - thawed: for freezable meat/fish/etc., days it lasts in the FRIDGE after thawing (usually 1-3 for raw meat). null if not applicable.
-Examples: fresh chicken -> {"where":"fridge","pantry":null,"fridge":2,"freezer":270,"thawed":2}; milk -> {"where":"fridge","pantry":null,"fridge":7,"freezer":90,"thawed":5}; dried pasta -> {"where":"pantry","pantry":730,"fridge":null,"freezer":null,"thawed":null}; bananas -> {"where":"pantry","pantry":5,"fridge":9,"freezer":60,"thawed":null}.
+- thaw_hours: hours needed to safely thaw this item from frozen in the FRIDGE (small cut of meat ~12, whole chicken ~24, ground meat ~12, bread ~3, frozen veg ~0 since you cook from frozen, butter ~2). null if it isn't something you thaw.
+Examples: chicken breast -> {"where":"fridge","pantry":null,"fridge":2,"freezer":270,"thawed":2,"thaw_hours":12}; ground beef -> {"where":"fridge","fridge":2,"freezer":120,"thawed":1,"thaw_hours":12}; whole turkey -> {"where":"fridge","fridge":2,"freezer":365,"thawed":2,"thaw_hours":72}; dried pasta -> {"where":"pantry","pantry":730,"fridge":null,"freezer":null,"thawed":null,"thaw_hours":null}.
 ITEMS: ${names.join(", ")}`;
 
 app.post("/api/shelf-life", requireAuth, async (req, res) => {
@@ -723,6 +740,7 @@ app.post("/api/shelf-life", requireAuth, async (req, res) => {
       fridge: dOrNull(r.fridge),
       freezer: dOrNull(r.freezer),
       thawed: dOrNull(r.thawed),
+      thaw_hours: dOrNull(r.thaw_hours),
     };
   }
   res.json({ results });
@@ -771,7 +789,7 @@ app.post("/api/parse", requireAuth, async (req, res) => {
       const full = expandParsed(obj, []);
       if (!full.ingredients.length)
         return res.status(422).json({ error: "No ingredients found in those photos. Try clearer pictures, or type it in." });
-      return res.json({ title: full.title, items: full.ingredients, steps: full.steps, servings: full.servings, nutrition: full.nutrition, source_url: "" });
+      return res.json({ title: full.title, items: full.ingredients, steps: full.steps, servings: full.servings, nutrition: full.nutrition, prep_min: full.prep_min, cook_min: full.cook_min, source_url: "" });
     }
 
     let sourceUrl = "";
@@ -835,6 +853,8 @@ app.post("/api/parse", requireAuth, async (req, res) => {
       steps: full.steps,
       servings: full.servings,
       nutrition: full.nutrition,
+      prep_min: full.prep_min,
+      cook_min: full.cook_min,
       source_url: sourceUrl,
     });
   } catch (e) {
@@ -855,12 +875,14 @@ app.get("/api/recipes/:id", requireAuth, (req, res) => {
     photos: row.photos ? JSON.parse(row.photos) : [] });
 });
 app.post("/api/recipes", requireAuth, (req, res) => {
-  const { title, source_url = "", ingredients = [], steps = [], nutrition = null, photos = [] } = req.body;
+  const { title, source_url = "", ingredients = [], steps = [], nutrition = null, photos = [],
+    prep_min = 0, cook_min = 0 } = req.body;
   if (!title?.trim()) return res.status(400).json({ error: "title required" });
-  const info = db.prepare("INSERT INTO recipes (title,source_url,ingredients,steps,created,nutrition,photos,user_id) VALUES (?,?,?,?,?,?,?,?)")
+  const info = db.prepare("INSERT INTO recipes (title,source_url,ingredients,steps,created,nutrition,photos,prep_min,cook_min,user_id) VALUES (?,?,?,?,?,?,?,?,?,?)")
     .run(title.trim(), source_url, JSON.stringify(ingredients), JSON.stringify(steps), Date.now(),
       nutrition ? JSON.stringify(nutrition) : "",
-      Array.isArray(photos) && photos.length ? JSON.stringify(photos) : "", req.userId);
+      Array.isArray(photos) && photos.length ? JSON.stringify(photos) : "",
+      Math.max(0, Math.round(prep_min) || 0), Math.max(0, Math.round(cook_min) || 0), req.userId);
   res.json({ id: info.lastInsertRowid });
 });
 app.delete("/api/recipes/:id", requireAuth, (req, res) => {
@@ -880,13 +902,61 @@ app.post("/api/recipes/:id/share", requireAuth, (req, res) => {
   if (!recipient) return res.status(404).json({ error: "no account with that username" });
   // avoid piling up duplicates if shared repeatedly
   const dupe = db.prepare("SELECT 1 FROM recipes WHERE user_id=? AND title=?").get(recipient.id, src.title);
-  // copy the recipe verbatim to the recipient (photos/nutrition/steps included)
-  db.prepare("INSERT INTO recipes (title,source_url,ingredients,steps,created,nutrition,photos,user_id) VALUES (?,?,?,?,?,?,?,?)")
-    .run(src.title, src.source_url, src.ingredients, src.steps, Date.now(), src.nutrition || "", src.photos || "", recipient.id);
+  // copy the recipe verbatim to the recipient (photos/nutrition/steps/times included)
+  db.prepare("INSERT INTO recipes (title,source_url,ingredients,steps,created,nutrition,photos,prep_min,cook_min,user_id) VALUES (?,?,?,?,?,?,?,?,?,?)")
+    .run(src.title, src.source_url, src.ingredients, src.steps, Date.now(), src.nutrition || "", src.photos || "", src.prep_min || 0, src.cook_min || 0, recipient.id);
   res.json({ ok: true, to, duplicate: !!dupe });
 });
 
-const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30i" }));
+// ---------- meal plan ----------
+// List planned meals in a date range (inclusive), each enriched with the
+// recipe's times and ingredients so the client can compute cook/thaw reminders.
+app.get("/api/meals", requireAuth, (req, res) => {
+  const from = (req.query.from || "").slice(0, 10);
+  const to = (req.query.to || "").slice(0, 10);
+  let rows;
+  if (from && to) rows = db.prepare("SELECT * FROM meal_plan WHERE user_id=? AND date>=? AND date<=? ORDER BY date, meal_time").all(req.userId, from, to);
+  else rows = db.prepare("SELECT * FROM meal_plan WHERE user_id=? ORDER BY date, meal_time").all(req.userId);
+  const enriched = rows.map((m) => {
+    let recipe = null;
+    if (m.recipe_id) {
+      const r = db.prepare("SELECT id,title,prep_min,cook_min,ingredients FROM recipes WHERE id=? AND user_id=?").get(m.recipe_id, req.userId);
+      if (r) recipe = { id: r.id, title: r.title, prep_min: r.prep_min, cook_min: r.cook_min, ingredients: JSON.parse(r.ingredients || "[]") };
+    }
+    return { ...m, recipe };
+  });
+  res.json(enriched);
+});
+app.post("/api/meals", requireAuth, (req, res) => {
+  const date = (req.body.date || "").slice(0, 10);
+  const meal_time = (req.body.meal_time || "").slice(0, 5);
+  const recipe_id = req.body.recipe_id || null;
+  let title = (req.body.title || "").trim();
+  if (!date) return res.status(400).json({ error: "date required" });
+  if (recipe_id) {
+    const r = db.prepare("SELECT title FROM recipes WHERE id=? AND user_id=?").get(recipe_id, req.userId);
+    if (!r) return res.status(404).json({ error: "recipe not found" });
+    title = r.title;
+  }
+  if (!title) return res.status(400).json({ error: "a recipe or a meal name is required" });
+  const info = db.prepare("INSERT INTO meal_plan (user_id,date,meal_time,recipe_id,title,created) VALUES (?,?,?,?,?,?)")
+    .run(req.userId, date, meal_time, recipe_id, title, Date.now());
+  res.json({ id: info.lastInsertRowid });
+});
+app.patch("/api/meals/:id", requireAuth, (req, res) => {
+  const m = db.prepare("SELECT * FROM meal_plan WHERE id=? AND user_id=?").get(req.params.id, req.userId);
+  if (!m) return res.status(404).json({ error: "not found" });
+  const date = req.body.date != null ? String(req.body.date).slice(0, 10) : m.date;
+  const meal_time = req.body.meal_time != null ? String(req.body.meal_time).slice(0, 5) : m.meal_time;
+  db.prepare("UPDATE meal_plan SET date=?, meal_time=? WHERE id=? AND user_id=?").run(date, meal_time, req.params.id, req.userId);
+  res.json({ ok: true });
+});
+app.delete("/api/meals/:id", requireAuth, (req, res) => {
+  db.prepare("DELETE FROM meal_plan WHERE id=? AND user_id=?").run(req.params.id, req.userId);
+  res.json({ ok: true });
+});
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30i]`));
+const PORT = process.env.PORT || 3000;
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30k" }));
+
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30k]`));
