@@ -239,7 +239,10 @@ async function callClaude(prompt, maxTokens = 1500, model = TEXT_MODEL) {
     `session $${sessionCost.toFixed(4)} over ${sessionCalls} call(s)`
   );
   const text = (data.content || []).filter((i) => i.type === "text").map((i) => i.text).join("");
-  if (!text) console.error("Anthropic returned no text. stop_reason:", data.stop_reason);
+  if (!text) {
+    console.error("Anthropic returned no text. stop_reason:", data.stop_reason);
+    if (data.stop_reason === "max_tokens") throw new Error("max_tokens");
+  }
   return text;
 }
 
@@ -484,7 +487,7 @@ app.post("/api/pantry-photo", async (req, res) => {
 });
 
 // ---------- pantry items from a grocery receipt photo ----------
-const RECEIPT_PROMPT = `This is a photo of a grocery store receipt. Extract the FOOD/GROCERY items purchased. Return ONLY MINIFIED JSON, no prose, no markdown.
+const RECEIPT_PROMPT = `This is a grocery store receipt (a photo or PDF). Extract the FOOD/GROCERY items purchased. Return ONLY MINIFIED JSON, no prose, no markdown.
 Shape: {"items":[{"n":name,"qty":count,"b":base_unit,"amt":amount_bought,"pl":pkg_label,"pb":pkg_full}]}
 For each grocery line:
 - n: expand abbreviations into a plain generic item name ("GV MLK 1GAL" -> "milk", "LG EGG 18CT" -> "egg", "BNLS CHKN BRST" -> "chicken breast"). singular.
@@ -500,13 +503,18 @@ app.post("/api/receipt", async (req, res) => {
   if (!process.env.ANTHROPIC_API_KEY)
     return res.status(500).json({ error: "ANTHROPIC_API_KEY not set on the server" });
   if (!image) return res.status(400).json({ error: "image required" });
+  // A PDF receipt is clean digital text — Haiku reads it well and far cheaper.
+  // A photographed receipt can have glare/creases, so use the stronger vision model.
+  const model = image_type === "application/pdf" ? TEXT_MODEL : VISION_MODEL;
   let raw;
   try {
     raw = (await callClaude([
       mediaBlock(image, image_type),
       { type: "text", text: RECEIPT_PROMPT },
-    ], 2000, VISION_MODEL)).replace(/```json|```/g, "").trim();
+    ], 4000, model)).replace(/```json|```/g, "").trim();
   } catch (e) {
+    if (e && e.message === "max_tokens")
+      return res.status(422).json({ error: "That receipt has a lot of items — try photographing it in two halves and adding each." });
     return res.status(422).json({ error: "Couldn't read that receipt. Try a clearer, flatter photo." });
   }
   let obj;
@@ -554,10 +562,12 @@ app.post("/api/parse", async (req, res) => {
       try {
         raw = (await callClaude(
           [...blocks, { type: "text", text: PARSE_PROMPT(note, true) }],
-          2000,
+          4000,
           VISION_MODEL
         )).replace(/```json|```/g, "").trim();
       } catch (e) {
+        if (e && e.message === "max_tokens")
+          return res.status(422).json({ error: "That recipe is very long — try splitting it or typing it in." });
         return res.status(422).json({ error: "Couldn't read those photos. Try clearer, well-lit pictures." });
       }
       let obj;
@@ -610,7 +620,7 @@ app.post("/api/parse", async (req, res) => {
 
     // Ask the model for steps only when we don't already have them from JSON-LD.
     const needSteps = jsonldSteps.length === 0;
-    const raw = (await callClaude(PARSE_PROMPT(recipe, needSteps))).replace(/```json|```/g, "").trim();
+    const raw = (await callClaude(PARSE_PROMPT(recipe, needSteps), 4000)).replace(/```json|```/g, "").trim();
     // The model should return only JSON, but guard against stray prose around it.
     let obj;
     try {
@@ -667,6 +677,6 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29y" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29z" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29y]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29z]`));
