@@ -55,14 +55,24 @@
 <body>
 <div class="wrap">
   <h1>Pantry &amp; List</h1>
-  <p class="sub">Paste a recipe, build your list, track what's in stock.</p>
-  <div class="tabs">
-    <button class="tab active" data-tab="recipe">Recipe</button>
-    <button class="tab" data-tab="list">List</button>
-    <button class="tab" data-tab="pantry">Pantry</button>
-    <button class="tab" data-tab="saved">Saved</button>
+
+  <!-- Login / signup screen (shown until authenticated) -->
+  <div id="auth" style="display:none"></div>
+
+  <!-- The app (hidden until logged in) -->
+  <div id="app" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+      <p class="sub" style="margin:0">Paste a recipe, build your list, track what's in stock.</p>
+      <button id="logout" class="ic" style="font-size:12px;color:#78716c;border:1px solid #e7e5e4;border-radius:8px;padding:4px 10px;white-space:nowrap">Log out</button>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="recipe">Recipe</button>
+      <button class="tab" data-tab="list">List</button>
+      <button class="tab" data-tab="pantry">Pantry</button>
+      <button class="tab" data-tab="saved">Saved</button>
+    </div>
+    <div id="view"></div>
   </div>
-  <div id="view"></div>
 </div>
 
 <script>
@@ -170,7 +180,11 @@ let pantryPhotoBusy = false, pantryPending = null;
 let receiptBusy = false, receiptItems = null;
 
 async function refresh() {
-  [pantry, list, saved] = await Promise.all([api("/pantry"), api("/list"), api("/recipes")]);
+  const [p, l, s] = await Promise.all([api("/pantry"), api("/list"), api("/recipes")]);
+  if (!Array.isArray(p) || !Array.isArray(l) || !Array.isArray(s)) { // session gone
+    showAuth(); return;
+  }
+  pantry = p; list = l; saved = s;
   render();
 }
 
@@ -1126,7 +1140,71 @@ async function confirmReceipt() {
   refresh();
 }
 
-refresh();
+// ---------- auth screen + boot ----------
+let authMode = "login", authErr = "", needsInvite = false;
+
+function authScreen() {
+  const field = (id, ph, type) =>
+    `<input id="${id}" placeholder="${ph}" type="${type || "text"}" autocapitalize="none" autocorrect="off"
+      style="width:100%;padding:11px 12px;border:1px solid #d6d3d1;border-radius:10px;font-size:15px;margin-bottom:10px" />`;
+  const isReg = authMode === "register";
+  return `
+    <p class="sub" style="text-align:center">Sign in to your kitchen.</p>
+    <div style="max-width:340px;margin:16px auto 0">
+      <div style="display:flex;gap:4px;background:rgba(214,211,209,.4);padding:4px;border-radius:12px;margin-bottom:16px">
+        <button data-auth="login" style="flex:1;border:0;padding:8px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;${!isReg ? "background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.06)" : "background:none;color:#78716c"}">Log in</button>
+        <button data-auth="register" style="flex:1;border:0;padding:8px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;${isReg ? "background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.06)" : "background:none;color:#78716c"}">Create account</button>
+      </div>
+      ${field("authUser", "Username")}
+      ${field("authPass", "Password", "password")}
+      ${isReg && needsInvite ? field("authInvite", "Invite code") : ""}
+      ${authErr ? `<p class="err">${esc(authErr)}</p>` : ""}
+      <button class="btn btn-green" id="authGo">${isReg ? "Create account" : "Log in"}</button>
+    </div>`;
+}
+
+function wireAuth() {
+  document.querySelectorAll("[data-auth]").forEach(b => b.onclick = () => { authMode = b.dataset.auth; authErr = ""; showAuth(); });
+  const go = $("#authGo"); if (go) go.onclick = submitAuth;
+  ["authUser", "authPass", "authInvite"].forEach(id => { const el = $("#" + id); if (el) el.onkeydown = e => { if (e.key === "Enter") submitAuth(); }; });
+}
+
+function showAuth() {
+  $("#app").style.display = "none";
+  $("#auth").style.display = "block";
+  $("#auth").innerHTML = authScreen();
+  wireAuth();
+}
+
+async function submitAuth() {
+  const username = ($("#authUser") || {}).value || "";
+  const password = ($("#authPass") || {}).value || "";
+  const invite = ($("#authInvite") || {}).value || "";
+  authErr = "";
+  const path = authMode === "register" ? "/register" : "/login";
+  const r = await api(path, J({ m: "POST", b: { username, password, invite } }));
+  if (r.error) { authErr = r.error; showAuth(); return; }
+  await startApp();
+}
+
+async function startApp() {
+  $("#auth").style.display = "none";
+  $("#app").style.display = "block";
+  tab = "recipe"; viewing = null;
+  await refresh();
+}
+
+async function boot() {
+  const me = await api("/me");
+  needsInvite = !!(me && me.needsInvite);
+  if (me && me.user) await startApp();
+  else showAuth();
+}
+
+const logoutBtn = $("#logout");
+if (logoutBtn) logoutBtn.onclick = async () => { await api("/logout", { method: "POST" }); authMode = "login"; showAuth(); };
+
+boot();
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));

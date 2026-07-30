@@ -2,6 +2,7 @@ import express from "express";
 import Database from "better-sqlite3";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import crypto from "crypto";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -46,6 +47,18 @@ db.exec(`
     source_url TEXT DEFAULT '',
     ingredients TEXT NOT NULL,   -- JSON array of parsed ingredient objects
     steps TEXT NOT NULL,         -- JSON array of step strings
+    created INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    pw_hash TEXT NOT NULL,       -- scrypt hash, hex
+    pw_salt TEXT NOT NULL,       -- per-user salt, hex
+    created INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,      -- random session id (in an httpOnly cookie)
+    user_id INTEGER NOT NULL,
     created INTEGER NOT NULL
   );
 `);
@@ -116,94 +129,191 @@ function migrate() {
   if (!pc.includes("added")) db.exec(`ALTER TABLE pantry ADD COLUMN added INTEGER DEFAULT 0`);
   if (!pc.includes("storage")) db.exec(`ALTER TABLE pantry ADD COLUMN storage TEXT DEFAULT ''`);
   if (!pc.includes("shelf_life")) db.exec(`ALTER TABLE pantry ADD COLUMN shelf_life TEXT DEFAULT ''`);
+  // multi-user: tag each data row with its owner. Existing rows default to
+  // user_id 0 ("unclaimed"); the first account created adopts them all.
+  for (const t of ["pantry", "list", "recipes"]) {
+    if (!columns(t).includes("user_id")) db.exec(`ALTER TABLE ${t} ADD COLUMN user_id INTEGER DEFAULT 0`);
+  }
 }
 migrate();
 
+// ---------- auth ----------
+const INVITE_CODE = process.env.INVITE_CODE || ""; // required to register
+const COOKIE = "pantry_session";
+
+function hashPassword(password, salt) {
+  return crypto.scryptSync(password, salt, 64).toString("hex");
+}
+function newToken() { return crypto.randomBytes(32).toString("hex"); }
+
+// Parse the session cookie and attach req.userId (or null).
+app.use((req, _res, next) => {
+  const raw = req.headers.cookie || "";
+  const m = raw.split(";").map((c) => c.trim()).find((c) => c.startsWith(COOKIE + "="));
+  req.userId = null;
+  if (m) {
+    const token = m.slice(COOKIE.length + 1);
+    const s = db.prepare("SELECT user_id FROM sessions WHERE token=?").get(token);
+    if (s) req.userId = s.user_id;
+  }
+  next();
+});
+
+// Gate for all data routes: must be logged in.
+function requireAuth(req, res, next) {
+  if (!req.userId) return res.status(401).json({ error: "not logged in" });
+  next();
+}
+
+function setSessionCookie(res, token) {
+  // httpOnly so JS can't read it; SameSite=Lax; Secure in production (HTTPS on Railway).
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  res.setHeader("Set-Cookie",
+    `${COOKIE}=${token}; HttpOnly; Path=/; Max-Age=${60 * 60 * 24 * 365}; SameSite=Lax${secure}`);
+}
+
+app.post("/api/register", (req, res) => {
+  const username = (req.body.username || "").trim().toLowerCase();
+  const password = req.body.password || "";
+  const invite = req.body.invite || "";
+  if (!username || !password) return res.status(400).json({ error: "username and password required" });
+  if (username.length < 3) return res.status(400).json({ error: "username must be at least 3 characters" });
+  if (password.length < 6) return res.status(400).json({ error: "password must be at least 6 characters" });
+  if (INVITE_CODE && invite !== INVITE_CODE) return res.status(403).json({ error: "invalid invite code" });
+  if (db.prepare("SELECT 1 FROM users WHERE username=?").get(username))
+    return res.status(409).json({ error: "that username is taken" });
+
+  const salt = crypto.randomBytes(16).toString("hex");
+  const pw_hash = hashPassword(password, salt);
+  const isFirst = !db.prepare("SELECT 1 FROM users LIMIT 1").get();
+  const info = db.prepare("INSERT INTO users (username,pw_hash,pw_salt,created) VALUES (?,?,?,?)")
+    .run(username, pw_hash, salt, Date.now());
+  const userId = info.lastInsertRowid;
+
+  // The very first account adopts all pre-existing (unclaimed) data.
+  if (isFirst) {
+    for (const t of ["pantry", "list", "recipes"])
+      db.prepare(`UPDATE ${t} SET user_id=? WHERE user_id=0 OR user_id IS NULL`).run(userId);
+  }
+
+  const token = newToken();
+  db.prepare("INSERT INTO sessions (token,user_id,created) VALUES (?,?,?)").run(token, userId, Date.now());
+  setSessionCookie(res, token);
+  res.json({ username, adopted: isFirst });
+});
+
+app.post("/api/login", (req, res) => {
+  const username = (req.body.username || "").trim().toLowerCase();
+  const password = req.body.password || "";
+  const u = db.prepare("SELECT * FROM users WHERE username=?").get(username);
+  if (!u) return res.status(401).json({ error: "wrong username or password" });
+  const attempt = hashPassword(password, u.pw_salt);
+  const ok = crypto.timingSafeEqual(Buffer.from(attempt, "hex"), Buffer.from(u.pw_hash, "hex"));
+  if (!ok) return res.status(401).json({ error: "wrong username or password" });
+  const token = newToken();
+  db.prepare("INSERT INTO sessions (token,user_id,created) VALUES (?,?,?)").run(token, u.id, Date.now());
+  setSessionCookie(res, token);
+  res.json({ username: u.username });
+});
+
+app.post("/api/logout", (req, res) => {
+  const raw = req.headers.cookie || "";
+  const m = raw.split(";").map((c) => c.trim()).find((c) => c.startsWith(COOKIE + "="));
+  if (m) db.prepare("DELETE FROM sessions WHERE token=?").run(m.slice(COOKIE.length + 1));
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  res.setHeader("Set-Cookie", `${COOKIE}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax${secure}`);
+  res.json({ ok: true });
+});
+
+// Who am I (used by the app on load to decide login vs app).
+app.get("/api/me", (req, res) => {
+  if (!req.userId) return res.json({ user: null, needsInvite: !!INVITE_CODE });
+  const u = db.prepare("SELECT username FROM users WHERE id=?").get(req.userId);
+  res.json({ user: u ? u.username : null, needsInvite: !!INVITE_CODE });
+});
+
 // ---------- pantry API ----------
-app.get("/api/pantry", (_, res) => res.json(db.prepare("SELECT * FROM pantry ORDER BY name").all()
-  .map((r) => ({ ...r, shelf_life: r.shelf_life ? JSON.parse(r.shelf_life) : null }))));
-app.post("/api/pantry", (req, res) => {
+app.get("/api/pantry", requireAuth, (req, res) => res.json(
+  db.prepare("SELECT * FROM pantry WHERE user_id=? ORDER BY name").all(req.userId)
+    .map((r) => ({ ...r, shelf_life: r.shelf_life ? JSON.parse(r.shelf_life) : null }))));
+app.post("/api/pantry", requireAuth, (req, res) => {
   const { name, base = 0, base_unit = "count", pkg_label = "each", pkg_base = 1,
     storage = "", shelf_life = null } = req.body;
   if (!name?.trim()) return res.status(400).json({ error: "name required" });
   const info = db.prepare(
-    "INSERT INTO pantry (name,base,base_unit,pkg_label,pkg_base,added,storage,shelf_life) VALUES (?,?,?,?,?,?,?,?)"
+    "INSERT INTO pantry (name,base,base_unit,pkg_label,pkg_base,added,storage,shelf_life,user_id) VALUES (?,?,?,?,?,?,?,?,?)"
   ).run(name.trim(), base, base_unit, pkg_label, pkg_base, Date.now(), storage,
-    shelf_life ? JSON.stringify(shelf_life) : "");
+    shelf_life ? JSON.stringify(shelf_life) : "", req.userId);
   res.json({ id: info.lastInsertRowid });
 });
-app.patch("/api/pantry/:id", (req, res) => {
-  // amount changes; may also change storage state (froze it / thawed it),
-  // and adding more of something resets the added date.
-  const cur = db.prepare("SELECT * FROM pantry WHERE id=?").get(req.params.id);
+app.patch("/api/pantry/:id", requireAuth, (req, res) => {
+  const cur = db.prepare("SELECT * FROM pantry WHERE id=? AND user_id=?").get(req.params.id, req.userId);
   if (!cur) return res.status(404).json({ error: "not found" });
   const base = req.body.base != null ? req.body.base : cur.base;
   const storage = req.body.storage != null ? req.body.storage : cur.storage;
-  // reset the clock when restocking (more was just bought) or when re-freezing
   const added = req.body.resetAdded ? Date.now() : cur.added;
-  db.prepare("UPDATE pantry SET base=?, storage=?, added=? WHERE id=?")
-    .run(base, storage, added, req.params.id);
+  db.prepare("UPDATE pantry SET base=?, storage=?, added=? WHERE id=? AND user_id=?")
+    .run(base, storage, added, req.params.id, req.userId);
   res.json({ ok: true });
 });
-app.delete("/api/pantry/:id", (req, res) => {
-  db.prepare("DELETE FROM pantry WHERE id=?").run(req.params.id);
+app.delete("/api/pantry/:id", requireAuth, (req, res) => {
+  db.prepare("DELETE FROM pantry WHERE id=? AND user_id=?").run(req.params.id, req.userId);
   res.json({ ok: true });
 });
 
 // ---------- list API ----------
-app.get("/api/list", (_, res) => res.json(db.prepare("SELECT * FROM list ORDER BY id").all()));
-app.post("/api/list", (req, res) => {
+app.get("/api/list", requireAuth, (req, res) =>
+  res.json(db.prepare("SELECT * FROM list WHERE user_id=? ORDER BY id").all(req.userId)));
+app.post("/api/list", requireAuth, (req, res) => {
   const { name, packages = 1, base_unit = "count", pkg_label = "each", pkg_base = 1 } = req.body;
   if (!name?.trim()) return res.status(400).json({ error: "name required" });
-  const info = db.prepare("INSERT INTO list (name,packages,base_unit,pkg_label,pkg_base,checked) VALUES (?,?,?,?,?,0)")
-    .run(name.trim(), packages, base_unit, pkg_label, pkg_base);
+  const info = db.prepare("INSERT INTO list (name,packages,base_unit,pkg_label,pkg_base,checked,user_id) VALUES (?,?,?,?,?,0,?)")
+    .run(name.trim(), packages, base_unit, pkg_label, pkg_base, req.userId);
   res.json({ id: info.lastInsertRowid });
 });
-app.patch("/api/list/:id", (req, res) => {
-  const row = db.prepare("SELECT * FROM list WHERE id=?").get(req.params.id);
+app.patch("/api/list/:id", requireAuth, (req, res) => {
+  const row = db.prepare("SELECT * FROM list WHERE id=? AND user_id=?").get(req.params.id, req.userId);
   if (!row) return res.status(404).json({ error: "not found" });
   const packages = req.body.packages ?? row.packages;
   const checked = req.body.checked ?? row.checked;
-  db.prepare("UPDATE list SET packages=?, checked=? WHERE id=?").run(packages, checked ? 1 : 0, req.params.id);
+  db.prepare("UPDATE list SET packages=?, checked=? WHERE id=? AND user_id=?").run(packages, checked ? 1 : 0, req.params.id, req.userId);
   res.json({ ok: true });
 });
-app.delete("/api/list/:id", (req, res) => {
-  db.prepare("DELETE FROM list WHERE id=?").run(req.params.id);
+app.delete("/api/list/:id", requireAuth, (req, res) => {
+  db.prepare("DELETE FROM list WHERE id=? AND user_id=?").run(req.params.id, req.userId);
   res.json({ ok: true });
 });
 
 // move all checked list items into pantry (adds packages * pkg_base to stock), then clear them
-app.post("/api/purchase", (_, res) => {
-  const bought = db.prepare("SELECT * FROM list WHERE checked=1").all();
+app.post("/api/purchase", requireAuth, (req, res) => {
+  const bought = db.prepare("SELECT * FROM list WHERE checked=1 AND user_id=?").all(req.userId);
   const tx = db.transaction(() => {
     for (const b of bought) {
       const addBase = +(b.packages * b.pkg_base).toFixed(2);
-      // Each purchase is its own dated batch (older stock is used first).
-      db.prepare("INSERT INTO pantry (name,base,base_unit,pkg_label,pkg_base,added,storage,shelf_life) VALUES (?,?,?,?,?,?,?,?)")
-        .run(b.name, addBase, b.base_unit, b.pkg_label, b.pkg_base, Date.now(), "", "");
+      db.prepare("INSERT INTO pantry (name,base,base_unit,pkg_label,pkg_base,added,storage,shelf_life,user_id) VALUES (?,?,?,?,?,?,?,?,?)")
+        .run(b.name, addBase, b.base_unit, b.pkg_label, b.pkg_base, Date.now(), "", "", req.userId);
     }
-    db.prepare("DELETE FROM list WHERE checked=1").run();
+    db.prepare("DELETE FROM list WHERE checked=1 AND user_id=?").run(req.userId);
   });
   tx();
   res.json({ ok: true, moved: bought.length });
 });
 
 // subtract cooked recipe usage (in base units) from pantry stock, oldest batch first
-app.post("/api/cook", (req, res) => {
+app.post("/api/cook", requireAuth, (req, res) => {
   const items = req.body.items || []; // [{name, use_base}]
   const norm = (s) => s.toLowerCase().trim().replace(/s$/, "");
   const tx = db.transaction(() => {
     for (const it of items) {
       let need = it.use_base;
-      // draw down matching batches oldest-first, emptying each before the next
-      const batches = db.prepare("SELECT * FROM pantry ORDER BY added ASC, id ASC").all()
+      const batches = db.prepare("SELECT * FROM pantry WHERE user_id=? ORDER BY added ASC, id ASC").all(req.userId)
         .filter((p) => norm(p.name) === norm(it.name));
       for (const b of batches) {
         if (need <= 0) break;
         const take = Math.min(b.base, need);
         const left = +(b.base - take).toFixed(2);
         need = +(need - take).toFixed(2);
-        if (left <= 0) db.prepare("DELETE FROM pantry WHERE id=?").run(b.id); // batch used up
+        if (left <= 0) db.prepare("DELETE FROM pantry WHERE id=?").run(b.id);
         else db.prepare("UPDATE pantry SET base=? WHERE id=?").run(left, b.id);
       }
     }
@@ -484,7 +594,7 @@ Shape: {"n":name,"b":base_unit,"amt":amount_present,"pl":pkg_label,"pb":pkg_full
 - pb: amount of b in a FULL package (gallon milk=3785; dozen eggs=12; 5 lb bag=2265)
 If you cannot identify a grocery item, return {"n":""}.`;
 
-app.post("/api/pantry-photo", async (req, res) => {
+app.post("/api/pantry-photo", requireAuth, async (req, res) => {
   const { image, image_type } = req.body;
   if (!process.env.ANTHROPIC_API_KEY)
     return res.status(500).json({ error: "ANTHROPIC_API_KEY not set on the server" });
@@ -533,7 +643,7 @@ What is NOT food (food:false): household & cleaning (paper towels, dish soap, de
 
 Rules: COMPLETELY OMIT receipt metadata lines — tax, subtotal, total, change, tender/payment, card info, savings/coupon/discount lines, loyalty, store name/address/phone, cashier, date. Those are not items and must not appear at all. Actual products go in the list with the correct food flag. If a product line is unreadable, skip it. If nothing is found, return {"items":[]}.`;
 
-app.post("/api/receipt", async (req, res) => {
+app.post("/api/receipt", requireAuth, async (req, res) => {
   const { image, image_type } = req.body;
   if (!process.env.ANTHROPIC_API_KEY)
     return res.status(500).json({ error: "ANTHROPIC_API_KEY not set on the server" });
@@ -585,7 +695,7 @@ Shape: {"r":[{"n":name,"where":"pantry"|"fridge"|"freezer","pantry":days,"fridge
 Examples: fresh chicken -> {"where":"fridge","pantry":null,"fridge":2,"freezer":270,"thawed":2}; milk -> {"where":"fridge","pantry":null,"fridge":7,"freezer":90,"thawed":5}; dried pasta -> {"where":"pantry","pantry":730,"fridge":null,"freezer":null,"thawed":null}; bananas -> {"where":"pantry","pantry":5,"fridge":9,"freezer":60,"thawed":null}.
 ITEMS: ${names.join(", ")}`;
 
-app.post("/api/shelf-life", async (req, res) => {
+app.post("/api/shelf-life", requireAuth, async (req, res) => {
   const names = Array.isArray(req.body.names) ? req.body.names.filter(Boolean) : [];
   if (!process.env.ANTHROPIC_API_KEY)
     return res.status(500).json({ error: "ANTHROPIC_API_KEY not set on the server" });
@@ -619,7 +729,7 @@ app.post("/api/shelf-life", async (req, res) => {
 });
 
 // ---------- recipe parsing: accepts pasted text, a url, OR photo(s) ----------
-app.post("/api/parse", async (req, res) => {
+app.post("/api/parse", requireAuth, async (req, res) => {
   let { recipe, url, image, image_type, images } = req.body;
   if (!process.env.ANTHROPIC_API_KEY)
     return res.status(500).json({ error: "ANTHROPIC_API_KEY not set on the server" });
@@ -734,31 +844,31 @@ app.post("/api/parse", async (req, res) => {
 });
 
 // ---------- saved recipes ----------
-app.get("/api/recipes", (_, res) =>
-  res.json(db.prepare("SELECT id,title,source_url,created,ingredients FROM recipes ORDER BY created DESC").all()
+app.get("/api/recipes", requireAuth, (req, res) =>
+  res.json(db.prepare("SELECT id,title,source_url,created,ingredients FROM recipes WHERE user_id=? ORDER BY created DESC").all(req.userId)
     .map((r) => ({ ...r, ingredients: JSON.parse(r.ingredients || "[]") }))));
-app.get("/api/recipes/:id", (req, res) => {
-  const row = db.prepare("SELECT * FROM recipes WHERE id=?").get(req.params.id);
+app.get("/api/recipes/:id", requireAuth, (req, res) => {
+  const row = db.prepare("SELECT * FROM recipes WHERE id=? AND user_id=?").get(req.params.id, req.userId);
   if (!row) return res.status(404).json({ error: "not found" });
   res.json({ ...row, ingredients: JSON.parse(row.ingredients), steps: JSON.parse(row.steps),
     nutrition: row.nutrition ? JSON.parse(row.nutrition) : null,
     photos: row.photos ? JSON.parse(row.photos) : [] });
 });
-app.post("/api/recipes", (req, res) => {
+app.post("/api/recipes", requireAuth, (req, res) => {
   const { title, source_url = "", ingredients = [], steps = [], nutrition = null, photos = [] } = req.body;
   if (!title?.trim()) return res.status(400).json({ error: "title required" });
-  const info = db.prepare("INSERT INTO recipes (title,source_url,ingredients,steps,created,nutrition,photos) VALUES (?,?,?,?,?,?,?)")
+  const info = db.prepare("INSERT INTO recipes (title,source_url,ingredients,steps,created,nutrition,photos,user_id) VALUES (?,?,?,?,?,?,?,?)")
     .run(title.trim(), source_url, JSON.stringify(ingredients), JSON.stringify(steps), Date.now(),
       nutrition ? JSON.stringify(nutrition) : "",
-      Array.isArray(photos) && photos.length ? JSON.stringify(photos) : "");
+      Array.isArray(photos) && photos.length ? JSON.stringify(photos) : "", req.userId);
   res.json({ id: info.lastInsertRowid });
 });
-app.delete("/api/recipes/:id", (req, res) => {
-  db.prepare("DELETE FROM recipes WHERE id=?").run(req.params.id);
+app.delete("/api/recipes/:id", requireAuth, (req, res) => {
+  db.prepare("DELETE FROM recipes WHERE id=? AND user_id=?").run(req.params.id, req.userId);
   res.json({ ok: true });
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30g" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30h" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30g]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30h]`));
