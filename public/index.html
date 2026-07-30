@@ -159,7 +159,7 @@ function recipeView() {
     html += `
       <div style="border:2px dashed #d6d3d1;border-radius:14px;padding:28px 16px;text-align:center;margin-bottom:12px">
         <p class="meta" style="margin-bottom:14px">Take or upload a photo of a recipe card — handwritten or printed.</p>
-        <input id="photoInput" type="file" accept="image/*" capture="environment" style="display:none" />
+        <input id="photoInput" type="file" accept="image/*" style="display:none" />
         <button class="btn btn-green" id="photoPick" ${parsing ? "disabled" : ""} style="max-width:260px;margin:0 auto">
           ${parsing ? "Reading photo…" : "📷 Choose / take photo"}</button>
         ${photoPreview ? `<div style="margin-top:14px"><img src="${photoPreview}" style="max-width:100%;max-height:220px;border-radius:10px" /></div>` : ""}
