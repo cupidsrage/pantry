@@ -5,7 +5,7 @@ import { dirname, join } from "path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "12mb" })); // photos arrive as base64 in the body
 app.use(
   express.static(join(__dirname, "public"), {
     setHeaders(res, path) {
@@ -179,14 +179,21 @@ app.post("/api/cook", (req, res) => {
 });
 
 // ---------- shared Anthropic call ----------
-// Haiku 4.5 pricing per million tokens (extraction doesn't need Sonnet's reasoning).
-const PARSE_MODEL = "claude-haiku-4-5-20251001";
-const PRICE_IN_PER_M = 1.0;
-const PRICE_OUT_PER_M = 5.0;
+// Text extraction runs on Haiku (cheap, plenty for clean text). Photos run on
+// Sonnet 5, which reads handwriting best — worth the extra fraction of a cent.
+const TEXT_MODEL = "claude-haiku-4-5-20251001";
+const VISION_MODEL = "claude-sonnet-5";
+const PRICING = {
+  "claude-haiku-4-5-20251001": { in: 1.0, out: 5.0 },
+  "claude-sonnet-4-6": { in: 3.0, out: 15.0 },
+  "claude-sonnet-5": { in: 2.0, out: 10.0 }, // intro pricing through Aug 31, 2026 ($3/$15 after)
+};
 let sessionCost = 0;
 let sessionCalls = 0;
 
-async function callClaude(prompt, maxTokens = 1500) {
+async function callClaude(prompt, maxTokens = 1500, model = TEXT_MODEL) {
+  // prompt is either a string (text only) or an array of content blocks (for images);
+  // the Anthropic API accepts either directly as the message content.
   const r = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -195,7 +202,7 @@ async function callClaude(prompt, maxTokens = 1500) {
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: PARSE_MODEL,
+      model,
       max_tokens: maxTokens,
       messages: [{ role: "user", content: prompt }],
     }),
@@ -209,11 +216,13 @@ async function callClaude(prompt, maxTokens = 1500) {
   const u = data.usage || {};
   const inTok = u.input_tokens || 0;
   const outTok = u.output_tokens || 0;
-  const cost = (inTok / 1e6) * PRICE_IN_PER_M + (outTok / 1e6) * PRICE_OUT_PER_M;
+  const price = PRICING[model] || PRICING[TEXT_MODEL];
+  const cost = (inTok / 1e6) * price.in + (outTok / 1e6) * price.out;
   sessionCost += cost;
   sessionCalls += 1;
+  const shortModel = model.includes("haiku") ? "haiku" : model.includes("sonnet") ? "sonnet" : model;
   console.log(
-    `[cost] in=${inTok} out=${outTok} tok | this call $${cost.toFixed(5)} | ` +
+    `[cost] ${shortModel} in=${inTok} out=${outTok} tok | this call $${cost.toFixed(5)} | ` +
     `session $${sessionCost.toFixed(4)} over ${sessionCalls} call(s)`
   );
   const text = (data.content || []).filter((i) => i.type === "text").map((i) => i.text).join("");
@@ -406,13 +415,39 @@ function expandParsed(obj, fallbackSteps) {
   };
 }
 
-// ---------- recipe parsing: accepts pasted text OR a url ----------
+// ---------- recipe parsing: accepts pasted text, a url, OR a photo ----------
 app.post("/api/parse", async (req, res) => {
-  let { recipe, url } = req.body;
+  let { recipe, url, image, image_type } = req.body;
   if (!process.env.ANTHROPIC_API_KEY)
     return res.status(500).json({ error: "ANTHROPIC_API_KEY not set on the server" });
 
   try {
+    // Photo of a recipe card: send the image to the vision model to read.
+    if (image) {
+      const media = image_type || "image/jpeg";
+      let raw;
+      try {
+        raw = (await callClaude([
+          { type: "image", source: { type: "base64", media_type: media, data: image } },
+          { type: "text", text: PARSE_PROMPT("(the recipe is in the attached image — read the handwriting/text and extract it)", true) },
+        ], 2000, VISION_MODEL)).replace(/```json|```/g, "").trim();
+      } catch (e) {
+        return res.status(422).json({ error: "Couldn't read that photo. Try a clearer, well-lit picture." });
+      }
+      let obj;
+      try {
+        obj = JSON.parse(raw);
+      } catch {
+        const f = raw.indexOf("{"), l = raw.lastIndexOf("}");
+        try { obj = JSON.parse(raw.slice(f, l + 1)); }
+        catch { return res.status(422).json({ error: "Couldn't read the recipe from that photo. Try a clearer picture, or type it in." }); }
+      }
+      const full = expandParsed(obj, []);
+      if (!full.ingredients.length)
+        return res.status(422).json({ error: "No ingredients found in that photo. Try a clearer picture, or type it in." });
+      return res.json({ title: full.title, items: full.ingredients, steps: full.steps, source_url: "" });
+    }
+
     let sourceUrl = "";
     let jsonldSteps = [];
     if (url?.trim()) {
@@ -501,6 +536,6 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29o" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29s" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29o]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29s]`));

@@ -105,6 +105,9 @@ let tab = "recipe", pantry = [], list = [], parsed = null, rawRecipe = "", parsi
 let recipeUrl = "", parsedTitle = "", parsedSteps = [], parsedSource = "";
 let saved = [], viewing = null, servings = 1, cookStep = -1;
 let shopping = false;
+let recipeMode = "import";  // "import" (link/paste), "manual", or "photo"
+let manualName = "", manualIngredients = "", manualDirections = "";
+let photoPreview = "";
 
 async function refresh() {
   [pantry, list, saved] = await Promise.all([api("/pantry"), api("/list"), api("/recipes")]);
@@ -128,7 +131,45 @@ function render() {
 }
 
 function recipeView() {
+  const seg = (m, label) =>
+    `<button class="segbtn ${recipeMode === m ? "active" : ""}" data-mode="${m}" style="flex:1;border:0;background:none;padding:8px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;${recipeMode === m ? "background:#fff;color:#1c1917;box-shadow:0 1px 2px rgba(0,0,0,.06)" : "color:#78716c"}">${label}</button>`;
   let html = `
+    <div style="display:flex;gap:4px;background:rgba(214,211,209,.4);padding:4px;border-radius:12px;margin-bottom:16px">
+      ${seg("import", "Link / paste")}${seg("manual", "Type it in")}${seg("photo", "Photo")}
+    </div>`;
+
+  if (recipeMode === "manual") {
+    html += `
+      <input id="mName" placeholder="Recipe name" value="${esc(manualName)}"
+        style="width:100%;padding:10px 12px;border:1px solid #d6d3d1;border-radius:10px;font-size:15px;margin-bottom:10px" />
+      <div class="meta" style="font-weight:600;margin-bottom:4px">INGREDIENTS — one per line</div>
+      <textarea id="mIng" placeholder="2 cloves garlic&#10;1 cup flour&#10;4 large potatoes&#10;1/2 lb bacon"
+        style="height:130px;margin-bottom:12px">${esc(manualIngredients)}</textarea>
+      <div class="meta" style="font-weight:600;margin-bottom:4px">DIRECTIONS — one step per line</div>
+      <textarea id="mDir" placeholder="Preheat oven to 350°F&#10;Bake potatoes 1 hour&#10;Scoop, mix, and refill"
+        style="height:130px;margin-bottom:12px">${esc(manualDirections)}</textarea>
+      <button class="btn btn-green" id="mSave" ${parsing ? "disabled" : ""}>
+        ${parsing ? "Saving…" : "Save recipe"}</button>
+      ${err ? `<p class="err">${esc(err)}</p>` : ""}
+      <p class="meta" style="margin-top:8px;text-align:center">Ingredient amounts get sized for shopping automatically, same as an imported recipe.</p>`;
+    return html;
+  }
+
+  if (recipeMode === "photo") {
+    html += `
+      <div style="border:2px dashed #d6d3d1;border-radius:14px;padding:28px 16px;text-align:center;margin-bottom:12px">
+        <p class="meta" style="margin-bottom:14px">Take or upload a photo of a recipe card — handwritten or printed.</p>
+        <input id="photoInput" type="file" accept="image/*" capture="environment" style="display:none" />
+        <button class="btn btn-green" id="photoPick" ${parsing ? "disabled" : ""} style="max-width:260px;margin:0 auto">
+          ${parsing ? "Reading photo…" : "📷 Choose / take photo"}</button>
+        ${photoPreview ? `<div style="margin-top:14px"><img src="${photoPreview}" style="max-width:100%;max-height:220px;border-radius:10px" /></div>` : ""}
+      </div>
+      ${err ? `<p class="err">${esc(err)}</p>` : ""}
+      <p class="meta" style="text-align:center">Clear, well-lit, straight-on photos read best. Messy handwriting may need a retry.</p>`;
+    return html;
+  }
+
+  html += `
     <div style="display:flex;gap:8px;margin-bottom:10px">
       <div style="flex:1;position:relative;display:flex;align-items:center">
         <input id="url" placeholder="Paste a recipe link (https://…)" value="${esc(recipeUrl)}"
@@ -335,6 +376,20 @@ function pantryView() {
 }
 
 function wire() {
+  document.querySelectorAll("[data-mode]").forEach(b => b.onclick = () => {
+    recipeMode = b.dataset.mode; err = ""; render();
+  });
+  const mn = $("#mName"); if (mn) mn.oninput = e => manualName = e.target.value;
+  const mi = $("#mIng"); if (mi) mi.oninput = e => manualIngredients = e.target.value;
+  const md = $("#mDir"); if (md) md.oninput = e => manualDirections = e.target.value;
+  const ms = $("#mSave"); if (ms) ms.onclick = saveManualRecipe;
+
+  const pp = $("#photoPick"); const pi = $("#photoInput");
+  if (pp && pi) {
+    pp.onclick = () => pi.click();
+    pi.onchange = () => { if (pi.files && pi.files[0]) handlePhoto(pi.files[0]); };
+  }
+
   const raw = $("#raw"); if (raw) raw.oninput = e => rawRecipe = e.target.value;
   const url = $("#url");
   if (url) url.oninput = e => {
@@ -430,6 +485,80 @@ async function extract({ recipe, url }) {
     err = "Couldn't read that recipe. Check the link, or paste the text instead.";
   } finally {
     parsing = false; render();
+  }
+}
+
+// Downscale an image file and return { dataUrl, base64, mediaType }.
+function readAndShrinkImage(file, maxDim = 1400) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      if (width > maxDim || height > maxDim) {
+        const scale = maxDim / Math.max(width, height);
+        width = Math.round(width * scale); height = Math.round(height * scale);
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width; canvas.height = height;
+      canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+      resolve({ dataUrl, base64: dataUrl.split(",")[1], mediaType: "image/jpeg" });
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("bad image")); };
+    img.src = url;
+  });
+}
+
+async function handlePhoto(file) {
+  err = ""; parsing = true; photoPreview = ""; render();
+  try {
+    const { dataUrl, base64, mediaType } = await readAndShrinkImage(file);
+    photoPreview = dataUrl; render();
+    const r = await api("/parse", J({ m: "POST", b: { image: base64, image_type: mediaType } }));
+    if (r.error) throw new Error(r.error);
+    if (!r.items || !r.items.length) throw new Error("No ingredients found in that photo. Try a clearer picture, or type it in.");
+    // route into the same review view the import flow uses
+    parsed = r.items.map(x => ({ ...x, use: true }));
+    parsedTitle = r.title || "";
+    parsedSteps = r.steps || [];
+    parsedSource = "";
+    recipeMode = "import"; // show the parsed card with save / add buttons
+  } catch (e) {
+    err = e && e.message ? e.message : "Couldn't read that photo. Try a clearer picture.";
+    photoPreview = "";
+  } finally {
+    parsing = false; render();
+  }
+}
+
+async function saveManualRecipe() {
+  if (!manualName.trim()) { err = "Give the recipe a name."; render(); return; }
+  if (!manualIngredients.trim()) { err = "Add at least one ingredient."; render(); return; }
+  parsing = true; err = ""; render();
+  try {
+    // Run the ingredient list through the parser to get shopping/pantry data.
+    const r = await api("/parse", J({ m: "POST", b: { recipe: `TITLE: ${manualName}\n\nINGREDIENTS:\n${manualIngredients}` } }));
+    if (r.error) throw new Error(r.error);
+    if (!r.items || r.items.length === 0) throw new Error("Couldn't read those ingredients. Check the formatting.");
+    const steps = manualDirections.split("\n").map(s => s.trim()).filter(Boolean);
+    await api("/recipes", J({ m: "POST", b: {
+      title: manualName.trim(),
+      source_url: "",
+      ingredients: r.items,
+      steps,
+    }}));
+    manualName = ""; manualIngredients = ""; manualDirections = "";
+    await refresh();
+    tab = "saved"; viewing = null; recipeMode = "import";
+    document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "saved"));
+    render();
+  } catch (e) {
+    err = e && e.message ? e.message : "Couldn't save the recipe.";
+  } finally {
+    parsing = false;
+    if (err) render();
   }
 }
 
