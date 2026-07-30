@@ -101,6 +101,10 @@ function migrate() {
     }
     db.exec("DROP TABLE pantry_old");
   }
+  // recipes: add nutrition column (JSON) if missing — ALTER is safe, keeps data
+  if (!columns("recipes").includes("nutrition")) {
+    db.exec("ALTER TABLE recipes ADD COLUMN nutrition TEXT DEFAULT ''");
+  }
 }
 migrate();
 
@@ -383,16 +387,19 @@ function extractRecipeJsonLd(html) {
 
 // Compact output keys keep the model's response small (output tokens cost 5x input).
 // Keys: n=name, q=use_qty, u=use_unit, b=base_unit, ub=use_base, pl=pkg_label, pb=pkg_base
+// srv=servings the recipe makes, cal/pro/carb/fat = per-serving nutrition estimate
 const PARSE_PROMPT = (recipeText, includeSteps) => `Extract this recipe as MINIFIED JSON. Return ONLY the JSON, no prose, no markdown, no whitespace/newlines between tokens.
-Shape: {"t":title,"i":[{"n":name,"q":use_qty,"u":unit,"b":base_unit,"ub":use_base,"pl":pkg_label,"pb":pkg_base}]${includeSteps ? ',"s":[step,...]' : ""}}
+Shape: {"t":title,"srv":servings,"cal":kcal,"pro":g,"carb":g,"fat":g,"i":[{"n":name,"q":use_qty,"u":unit,"b":base_unit,"ub":use_base,"pl":pkg_label,"pb":pkg_base}]${includeSteps ? ',"s":[step,...]' : ""}}
 Field meaning:
+- srv: how many servings the recipe makes (estimate a sensible number if not stated)
+- cal/pro/carb/fat: estimated nutrition PER SERVING — calories (kcal), protein (g), carbs (g), fat (g), whole numbers
 - n: singular generic grocery name ("flour","garlic","chicken breast")
 - q: amount recipe uses (number); u: its unit ("tbsp","cup","clove","whole","g","oz")
 - b: "g" (solids) | "ml" (liquids) | "count" (whole items)
 - ub: q converted to b (1 tbsp flour=8 g; 2 cloves garlic=2 count; 1 lemon=1 count)
 - pl: what you buy ("5 lb bag","head","bunch","1 lb","stick","each")
 - pb: amount of b in ONE package (5 lb bag flour=2265; head garlic=10; bunch parsley=30; lemon=1; stick butter=113)
-${includeSteps ? "- s: ordered cooking steps, each a short plain sentence\n" : ""}Rules: realistic US package sizes. Whole items sold individually -> b "count", pb 1, pl "each". Garlic -> count in cloves, head ~10. Combine duplicates. Skip water and plain salt/pepper "to taste". Ignore any site navigation/ads/reviews in the text. If no recipe found, return {"t":"","i":[]}.
+${includeSteps ? "- s: ordered cooking steps, each a short plain sentence\n" : ""}Rules: realistic US package sizes. Whole items sold individually -> b "count", pb 1, pl "each". Garlic -> count in cloves, head ~10. Combine duplicates. Skip water and plain salt/pepper "to taste". Nutrition is a reasonable estimate from the ingredients, not a lab value. Ignore any site navigation/ads/reviews in the text. If no recipe found, return {"t":"","i":[]}.
 
 RECIPE:
 ${recipeText}`;
@@ -400,8 +407,14 @@ ${recipeText}`;
 // Expand the compact keys back into the full shape the rest of the app expects.
 function expandParsed(obj, fallbackSteps) {
   const items = Array.isArray(obj.i) ? obj.i : [];
+  const num = (v) => (typeof v === "number" && isFinite(v) ? v : null);
+  const nutrition = (num(obj.cal) || num(obj.pro) || num(obj.carb) || num(obj.fat))
+    ? { servings: num(obj.srv) || null, calories: num(obj.cal), protein: num(obj.pro), carbs: num(obj.carb), fat: num(obj.fat) }
+    : null;
   return {
     title: obj.t || "Untitled recipe",
+    servings: num(obj.srv) || null,
+    nutrition,
     ingredients: items.map((x) => ({
       name: x.n,
       use_qty: x.q,
@@ -456,7 +469,7 @@ app.post("/api/parse", async (req, res) => {
       const full = expandParsed(obj, []);
       if (!full.ingredients.length)
         return res.status(422).json({ error: "No ingredients found in those photos. Try clearer pictures, or type it in." });
-      return res.json({ title: full.title, items: full.ingredients, steps: full.steps, source_url: "" });
+      return res.json({ title: full.title, items: full.ingredients, steps: full.steps, servings: full.servings, nutrition: full.nutrition, source_url: "" });
     }
 
     let sourceUrl = "";
@@ -518,6 +531,8 @@ app.post("/api/parse", async (req, res) => {
       title: full.title,
       items: full.ingredients,
       steps: full.steps,
+      servings: full.servings,
+      nutrition: full.nutrition,
       source_url: sourceUrl,
     });
   } catch (e) {
@@ -528,17 +543,20 @@ app.post("/api/parse", async (req, res) => {
 
 // ---------- saved recipes ----------
 app.get("/api/recipes", (_, res) =>
-  res.json(db.prepare("SELECT id,title,source_url,created FROM recipes ORDER BY created DESC").all()));
+  res.json(db.prepare("SELECT id,title,source_url,created,ingredients FROM recipes ORDER BY created DESC").all()
+    .map((r) => ({ ...r, ingredients: JSON.parse(r.ingredients || "[]") }))));
 app.get("/api/recipes/:id", (req, res) => {
   const row = db.prepare("SELECT * FROM recipes WHERE id=?").get(req.params.id);
   if (!row) return res.status(404).json({ error: "not found" });
-  res.json({ ...row, ingredients: JSON.parse(row.ingredients), steps: JSON.parse(row.steps) });
+  res.json({ ...row, ingredients: JSON.parse(row.ingredients), steps: JSON.parse(row.steps),
+    nutrition: row.nutrition ? JSON.parse(row.nutrition) : null });
 });
 app.post("/api/recipes", (req, res) => {
-  const { title, source_url = "", ingredients = [], steps = [] } = req.body;
+  const { title, source_url = "", ingredients = [], steps = [], nutrition = null } = req.body;
   if (!title?.trim()) return res.status(400).json({ error: "title required" });
-  const info = db.prepare("INSERT INTO recipes (title,source_url,ingredients,steps,created) VALUES (?,?,?,?,?)")
-    .run(title.trim(), source_url, JSON.stringify(ingredients), JSON.stringify(steps), Date.now());
+  const info = db.prepare("INSERT INTO recipes (title,source_url,ingredients,steps,created,nutrition) VALUES (?,?,?,?,?,?)")
+    .run(title.trim(), source_url, JSON.stringify(ingredients), JSON.stringify(steps), Date.now(),
+      nutrition ? JSON.stringify(nutrition) : "");
   res.json({ id: info.lastInsertRowid });
 });
 app.delete("/api/recipes/:id", (req, res) => {
@@ -547,6 +565,6 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29u" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29v" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29u]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29v]`));

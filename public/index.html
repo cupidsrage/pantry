@@ -102,13 +102,14 @@ function showBase(base, unit) {
 function pkgsFromBase(base, pkgBase) { return pkgBase > 0 ? base / pkgBase : 0; }
 
 let tab = "recipe", pantry = [], list = [], parsed = null, rawRecipe = "", parsing = false, err = "";
-let recipeUrl = "", parsedTitle = "", parsedSteps = [], parsedSource = "";
+let recipeUrl = "", parsedTitle = "", parsedSteps = [], parsedSource = "", parsedNutrition = null;
 let saved = [], viewing = null, servings = 1, cookStep = -1;
 let shopping = false;
 let recipeMode = "import";  // "import" (link/paste), "manual", or "photo"
 let manualName = "", manualIngredients = "", manualDirections = "";
 let parsedDirty = false;      // ingredient list was hand-edited since parse
 let photoImages = [];         // multiple pages: [{base64, mediaType, dataUrl}]
+let savedSort = "recent";     // "recent" | "az" | "canmake"
 
 async function refresh() {
   [pantry, list, saved] = await Promise.all([api("/pantry"), api("/list"), api("/recipes")]);
@@ -225,6 +226,7 @@ function recipeView() {
         <div class="meta" style="font-weight:600;margin-bottom:6px">STEPS</div>
         <ol style="padding-left:18px;font-size:14px;line-height:1.5">${parsedSteps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>
       </div>`;
+    html += nutritionBlock(parsedNutrition);
     html += `<div style="padding:12px;background:#fafaf9;border-top:1px solid #f5f5f4">
       <div class="actions" style="margin-top:0">
         <button class="btn btn-green" id="toList">Add needed → List</button>
@@ -238,23 +240,72 @@ function recipeView() {
 }
 
 // ---------- Saved recipes ----------
+// How many of a recipe's ingredients the pantry can cover right now → {have, total}.
+function recipeCoverage(r) {
+  const ings = r.ingredients || [];
+  let have = 0;
+  for (const ing of ings) {
+    const inPantry = pantry.find(x => norm(x.name) === norm(ing.name));
+    if (inPantry && inPantry.base >= (ing.use_base || 0)) have++;
+  }
+  return { have, total: ings.length };
+}
+
 function savedView() {
   if (viewing) return recipeDetailView();
-  if (!saved.length) return `<p class="empty">No saved recipes yet. Parse one on the Recipe tab and tap “Save recipe”.</p>`;
-  return saved.map(r => `
-    <div class="row">
+  if (!saved.length) return `<p class="empty">No saved recipes yet. Parse one on the Recipe tab and tap “Save”.</p>`;
+
+  const seg = (k, label) =>
+    `<button data-sort="${k}" style="flex:1;border:0;padding:8px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;${savedSort === k ? "background:#fff;color:#1c1917;box-shadow:0 1px 2px rgba(0,0,0,.06)" : "background:none;color:#78716c"}">${label}</button>`;
+  let html = `<div style="display:flex;gap:4px;background:rgba(214,211,209,.4);padding:4px;border-radius:12px;margin-bottom:14px">
+      ${seg("recent", "Recent")}${seg("az", "A–Z")}${seg("canmake", "Can make")}
+    </div>`;
+
+  // build a display list with coverage, then sort
+  let rows = saved.map(r => ({ r, cov: recipeCoverage(r) }));
+  if (savedSort === "az") {
+    rows.sort((a, b) => (a.r.title || "").localeCompare(b.r.title || ""));
+  } else if (savedSort === "canmake") {
+    // fully-makeable first, then by fraction of ingredients on hand
+    const frac = (c) => c.total ? c.have / c.total : 0;
+    rows.sort((a, b) => (frac(b.cov) - frac(a.cov)) || (a.r.title || "").localeCompare(b.r.title || ""));
+  } // "recent" keeps server order (newest first)
+
+  html += rows.map(({ r, cov }) => {
+    const makeable = cov.total > 0 && cov.have === cov.total;
+    const badge = makeable
+      ? `<span style="font-size:11px;font-weight:600;color:#059669;background:#ecfdf5;padding:2px 8px;border-radius:10px">✓ can make</span>`
+      : `<span class="meta">${cov.have}/${cov.total} on hand</span>`;
+    return `<div class="row">
       <span style="flex:1" data-open-recipe="${r.id}" role="button">
         <span class="name">${esc(r.title)}</span><br>
-        <span class="meta">${r.source_url ? "from link" : "pasted"} · ${new Date(r.created).toLocaleDateString()}</span>
+        ${badge}
       </span>
       <button class="btn btn-sky" data-open-recipe="${r.id}" style="width:auto;padding:6px 14px">Open</button>
       <button class="ic del" data-rdel="${r.id}">🗑</button>
-    </div>`).join("");
+    </div>`;
+  }).join("");
+  return html;
+}
+
+// Render a per-serving nutrition panel from a nutrition object.
+function nutritionBlock(n) {
+  if (!n || (!n.calories && !n.protein && !n.carbs && !n.fat)) return "";
+  const cell = (label, val, unit) => val == null ? "" :
+    `<div style="text-align:center;flex:1">
+       <div style="font-size:17px;font-weight:700">${Math.round(val)}${unit}</div>
+       <div class="meta">${label}</div>
+     </div>`;
+  return `<div style="padding:10px 12px;border-top:1px solid #f5f5f4">
+      <div class="meta" style="font-weight:600;margin-bottom:8px">PER SERVING${n.servings ? ` · makes ${n.servings}` : ""} <span style="font-weight:400">(estimated)</span></div>
+      <div style="display:flex;gap:6px">
+        ${cell("calories", n.calories, "")}${cell("protein", n.protein, "g")}${cell("carbs", n.carbs, "g")}${cell("fat", n.fat, "g")}
+      </div>
+    </div>`;
 }
 
 // pretty-print a possibly-fractional scaled quantity
-function niceQty(n) {
-  const r = Math.round(n * 100) / 100;
+function niceQty(n) {  const r = Math.round(n * 100) / 100;
   if (Number.isInteger(r)) return `${r}`;
   const frac = { 0.25: "¼", 0.5: "½", 0.75: "¾", 0.33: "⅓", 0.67: "⅔" };
   const whole = Math.floor(r), rem = Math.round((r - whole) * 100) / 100;
@@ -292,6 +343,7 @@ function recipeDetailView() {
         </div>
         <ol style="padding-left:18px;font-size:14px;line-height:1.6">${r.steps.map(s => `<li style="margin-bottom:6px">${esc(s)}</li>`).join("")}</ol>
       </div>` : ""}
+      ${nutritionBlock(r.nutrition)}
       ${err ? `<p class="err" style="padding:0 12px">${esc(err)}</p>` : ""}
       <div style="padding:12px;background:#fafaf9;border-top:1px solid #f5f5f4">
         <div class="actions" style="margin-top:0">
@@ -444,6 +496,7 @@ function wire() {
   const sv = $("#save"); if (sv) sv.onclick = saveRecipe;
 
   // saved tab
+  document.querySelectorAll("[data-sort]").forEach(b => b.onclick = () => { savedSort = b.dataset.sort; render(); });
   document.querySelectorAll("[data-open-recipe]").forEach(b => b.onclick = async () => {
     viewing = await api(`/recipes/${b.dataset.openRecipe}`); servings = 1; cookStep = -1; err = ""; render();
   });
@@ -516,6 +569,7 @@ async function extract({ recipe, url }) {
     parsedTitle = r.title || "";
     parsedSteps = r.steps || [];
     parsedSource = r.source_url || "";
+    parsedNutrition = r.nutrition || null;
     parsedDirty = false;
   } catch (e) {
     err = "Couldn't read that recipe. Check the link, or paste the text instead.";
@@ -603,6 +657,7 @@ async function readPhotoPages() {
     parsedTitle = r.title || "";
     parsedSteps = r.steps || [];
     parsedSource = "";
+    parsedNutrition = r.nutrition || null;
     parsedDirty = false;
     photoImages = [];
     recipeMode = "import"; // show the editable parsed card
@@ -628,6 +683,7 @@ async function saveManualRecipe() {
       source_url: "",
       ingredients: r.items,
       steps,
+      nutrition: r.nutrition || null,
     }}));
     manualName = ""; manualIngredients = ""; manualDirections = "";
     await refresh();
@@ -649,6 +705,7 @@ async function saveRecipe() {
     source_url: parsedSource,
     ingredients: parsed.filter(p => p.use !== false).map(({ use, ...rest }) => rest),
     steps: parsedSteps,
+    nutrition: parsedNutrition,
   }}));
   await refresh();
   tab = "saved"; viewing = null;
