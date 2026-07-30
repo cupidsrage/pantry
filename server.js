@@ -179,6 +179,12 @@ app.post("/api/cook", (req, res) => {
 });
 
 // ---------- shared Anthropic call ----------
+// Sonnet 4.6 pricing per million tokens (update if you change the model).
+const PRICE_IN_PER_M = 3.0;
+const PRICE_OUT_PER_M = 15.0;
+let sessionCost = 0;
+let sessionCalls = 0;
+
 async function callClaude(prompt, maxTokens = 4000) {
   const r = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -198,6 +204,17 @@ async function callClaude(prompt, maxTokens = 4000) {
     console.error("Anthropic API error:", JSON.stringify(data.error).slice(0, 300));
     throw new Error("anthropic: " + (data.error.message || data.error.type || "unknown"));
   }
+  // Log token usage and dollar cost to the console.
+  const u = data.usage || {};
+  const inTok = u.input_tokens || 0;
+  const outTok = u.output_tokens || 0;
+  const cost = (inTok / 1e6) * PRICE_IN_PER_M + (outTok / 1e6) * PRICE_OUT_PER_M;
+  sessionCost += cost;
+  sessionCalls += 1;
+  console.log(
+    `[cost] in=${inTok} out=${outTok} tok | this call $${cost.toFixed(5)} | ` +
+    `session $${sessionCost.toFixed(4)} over ${sessionCalls} call(s)`
+  );
   const text = (data.content || []).filter((i) => i.type === "text").map((i) => i.text).join("");
   if (!text) console.error("Anthropic returned no text. stop_reason:", data.stop_reason);
   return text;
@@ -462,6 +479,6 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29m" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29n" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29m]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29n]`));
