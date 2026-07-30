@@ -156,14 +156,15 @@ function groupedPantry() {
 }
 
 let tab = "recipe", pantry = [], list = [], parsed = null, rawRecipe = "", parsing = false, err = "";
-let recipeUrl = "", parsedTitle = "", parsedSteps = [], parsedSource = "", parsedNutrition = null;
+let recipeUrl = "", parsedTitle = "", parsedSteps = [], parsedSource = "", parsedNutrition = null, parsedPhotos = [];
 let saved = [], viewing = null, servings = 1, cookStep = -1;
 let shopping = false;
 let recipeMode = "import";  // "import" (link/paste), "manual", or "photo"
 let manualName = "", manualIngredients = "", manualDirections = "";
 let parsedDirty = false;      // ingredient list was hand-edited since parse
 let photoImages = [];         // multiple pages: [{base64, mediaType, dataUrl}]
-let savedSort = "recent";     // "recent" | "az" | "canmake"
+let savedSort = "recent";     // "recent" | "az" | "canmake" | "expiring"
+let showPhotos = false;       // detail view: original photos expanded
 let pantryPhotoBusy = false, pantryPending = null;
 let receiptBusy = false, receiptItems = null;
 
@@ -395,13 +396,26 @@ function niceQty(n) {  const r = Math.round(n * 100) / 100;
 function recipeDetailView() {
   const r = viewing;
   if (cookStep >= 0) return cookModeView();
+  const photos = r.photos || [];
+  const hasPdf = photos.some(p => typeof p === "string" && p.startsWith("data:application/pdf"));
   return `
     <button class="ic" id="backSaved" style="font-size:14px;margin-bottom:8px">← all recipes</button>
     <div class="parsed">
       <div class="parsed-head" style="display:flex;justify-content:space-between;align-items:center">
         <span>${esc(r.title)}</span>
-        ${r.source_url ? `<a class="ic link" href="${esc(r.source_url)}" target="_blank" rel="noreferrer" style="font-size:12px">source ↗</a>` : ""}
+        ${r.source_url
+          ? `<a class="ic link" href="${esc(r.source_url)}" target="_blank" rel="noreferrer" style="font-size:12px">source ↗</a>`
+          : photos.length
+          ? (hasPdf
+              ? `<a class="ic link" href="${photos[0]}" target="_blank" rel="noreferrer" style="font-size:12px">📄 source PDF ↗</a>`
+              : `<button class="ic link" id="togglePhotos" style="font-size:12px;border:0;background:none;cursor:pointer;color:#0284c7">📷 source ${showPhotos ? "▲" : `photo${photos.length > 1 ? "s" : ""} ▼`}</button>`)
+          : ""}
       </div>
+      ${(!hasPdf && photos.length && showPhotos)
+        ? `<div style="padding:10px 12px;border-bottom:1px solid #f5f5f4;display:flex;flex-wrap:wrap;gap:8px">
+            ${photos.map(p => `<a href="${p}" target="_blank" rel="noreferrer"><img src="${p}" style="max-width:140px;max-height:180px;border-radius:8px;border:1px solid #e7e5e4" /></a>`).join("")}
+          </div>`
+        : ""}
       <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid #f5f5f4">
         <span class="meta" style="font-weight:600">SERVINGS ×</span>
         <button class="ic" id="servDown" style="font-size:18px;border:1px solid #d6d3d1;border-radius:8px;width:30px">−</button>
@@ -661,8 +675,9 @@ function wire() {
   // saved tab
   document.querySelectorAll("[data-sort]").forEach(b => b.onclick = () => { savedSort = b.dataset.sort; render(); });
   document.querySelectorAll("[data-open-recipe]").forEach(b => b.onclick = async () => {
-    viewing = await api(`/recipes/${b.dataset.openRecipe}`); servings = 1; cookStep = -1; err = ""; render();
+    viewing = await api(`/recipes/${b.dataset.openRecipe}`); servings = 1; cookStep = -1; showPhotos = false; err = ""; render();
   });
+  const tp = $("#togglePhotos"); if (tp) tp.onclick = () => { showPhotos = !showPhotos; render(); };
   document.querySelectorAll("[data-rdel]").forEach(b => b.onclick = async () => {
     await api(`/recipes/${b.dataset.rdel}`, { method: "DELETE" }); refresh();
   });
@@ -771,6 +786,7 @@ async function extract({ recipe, url }) {
     parsedSteps = r.steps || [];
     parsedSource = r.source_url || "";
     parsedNutrition = r.nutrition || null;
+    parsedPhotos = [];
     parsedDirty = false;
   } catch (e) {
     err = "Couldn't read that recipe. Check the link, or paste the text instead.";
@@ -858,7 +874,7 @@ async function addPhotoPage(file) {
   if (file.type === "application/pdf") {
     parsing = true; render();
     try {
-      const { base64, mediaType } = await fileToBase64(file);
+      const { base64, mediaType, dataUrl } = await fileToBase64(file);
       const r = await api("/parse", J({ m: "POST", b: { image: base64, image_type: mediaType } }));
       if (r.error) throw new Error(r.error);
       if (!r.items || !r.items.length) throw new Error("No ingredients found in that PDF. Try a clearer file, or type it in.");
@@ -867,6 +883,7 @@ async function addPhotoPage(file) {
       parsedSteps = r.steps || [];
       parsedSource = "";
       parsedNutrition = r.nutrition || null;
+      parsedPhotos = [dataUrl]; // the PDF itself, opened via the source link
       parsedDirty = false;
       photoImages = [];
       recipeMode = "import";
@@ -899,6 +916,7 @@ async function readPhotoPages() {
     parsedSteps = r.steps || [];
     parsedSource = "";
     parsedNutrition = r.nutrition || null;
+    parsedPhotos = photoImages.map(im => im.dataUrl); // keep originals to store with the recipe
     parsedDirty = false;
     photoImages = [];
     recipeMode = "import"; // show the editable parsed card
@@ -947,9 +965,11 @@ async function saveRecipe() {
     ingredients: parsed.filter(p => p.use !== false).map(({ use, ...rest }) => rest),
     steps: parsedSteps,
     nutrition: parsedNutrition,
+    photos: parsedPhotos,
   }}));
   await refresh();
   tab = "saved"; viewing = null;
+  parsedPhotos = [];
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "saved"));
   render();
 }

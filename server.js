@@ -105,6 +105,11 @@ function migrate() {
   if (!columns("recipes").includes("nutrition")) {
     db.exec("ALTER TABLE recipes ADD COLUMN nutrition TEXT DEFAULT ''");
   }
+  // recipes: store the uploaded photos (JSON array of data URLs) so a photo
+  // recipe's "source" can show the original images.
+  if (!columns("recipes").includes("photos")) {
+    db.exec("ALTER TABLE recipes ADD COLUMN photos TEXT DEFAULT ''");
+  }
   // pantry: expiration tracking — when it was added, how it's stored, and the
   // per-storage shelf life (JSON: {pantry,fridge,freezer,thawed} in days).
   const pc = columns("pantry");
@@ -736,14 +741,16 @@ app.get("/api/recipes/:id", (req, res) => {
   const row = db.prepare("SELECT * FROM recipes WHERE id=?").get(req.params.id);
   if (!row) return res.status(404).json({ error: "not found" });
   res.json({ ...row, ingredients: JSON.parse(row.ingredients), steps: JSON.parse(row.steps),
-    nutrition: row.nutrition ? JSON.parse(row.nutrition) : null });
+    nutrition: row.nutrition ? JSON.parse(row.nutrition) : null,
+    photos: row.photos ? JSON.parse(row.photos) : [] });
 });
 app.post("/api/recipes", (req, res) => {
-  const { title, source_url = "", ingredients = [], steps = [], nutrition = null } = req.body;
+  const { title, source_url = "", ingredients = [], steps = [], nutrition = null, photos = [] } = req.body;
   if (!title?.trim()) return res.status(400).json({ error: "title required" });
-  const info = db.prepare("INSERT INTO recipes (title,source_url,ingredients,steps,created,nutrition) VALUES (?,?,?,?,?,?)")
+  const info = db.prepare("INSERT INTO recipes (title,source_url,ingredients,steps,created,nutrition,photos) VALUES (?,?,?,?,?,?,?)")
     .run(title.trim(), source_url, JSON.stringify(ingredients), JSON.stringify(steps), Date.now(),
-      nutrition ? JSON.stringify(nutrition) : "");
+      nutrition ? JSON.stringify(nutrition) : "",
+      Array.isArray(photos) && photos.length ? JSON.stringify(photos) : "");
   res.json({ id: info.lastInsertRowid });
 });
 app.delete("/api/recipes/:id", (req, res) => {
@@ -752,6 +759,6 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30e" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30f" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30e]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30f]`));
