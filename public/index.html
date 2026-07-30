@@ -165,6 +165,7 @@ let parsedDirty = false;      // ingredient list was hand-edited since parse
 let photoImages = [];         // multiple pages: [{base64, mediaType, dataUrl}]
 let savedSort = "recent";     // "recent" | "az" | "canmake" | "expiring"
 let showPhotos = false;       // detail view: original photos expanded
+let lightbox = null;          // data URL of a photo shown full-screen, or null
 let pantryPhotoBusy = false, pantryPending = null;
 let receiptBusy = false, receiptItems = null;
 
@@ -182,11 +183,20 @@ document.querySelectorAll(".tab").forEach(b =>
 
 function render() {
   $("#view").innerHTML =
-    tab === "recipe" ? recipeView() :
+    (tab === "recipe" ? recipeView() :
     tab === "list" ? listView() :
     tab === "pantry" ? pantryView() :
-    savedView();
+    savedView()) + lightboxHtml();
   wire();
+}
+
+// Full-screen image overlay. Empty string when nothing is zoomed.
+function lightboxHtml() {
+  if (!lightbox) return "";
+  return `<div id="lightbox" style="position:fixed;inset:0;background:rgba(0,0,0,.9);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px;cursor:zoom-out">
+      <img src="${lightbox}" style="max-width:100%;max-height:100%;border-radius:8px" />
+      <button id="lightboxClose" aria-label="close" style="position:absolute;top:14px;right:16px;background:rgba(255,255,255,.15);color:#fff;border:0;width:36px;height:36px;border-radius:50%;font-size:20px;cursor:pointer;line-height:1">✕</button>
+    </div>`;
 }
 
 function recipeView() {
@@ -413,7 +423,7 @@ function recipeDetailView() {
       </div>
       ${(!hasPdf && photos.length && showPhotos)
         ? `<div style="padding:10px 12px;border-bottom:1px solid #f5f5f4;display:flex;flex-wrap:wrap;gap:8px">
-            ${photos.map(p => `<a href="${p}" target="_blank" rel="noreferrer"><img src="${p}" style="max-width:140px;max-height:180px;border-radius:8px;border:1px solid #e7e5e4" /></a>`).join("")}
+            ${photos.map((p, pi) => `<img src="${p}" data-lightbox="${pi}" style="max-width:140px;max-height:180px;border-radius:8px;border:1px solid #e7e5e4;cursor:zoom-in" />`).join("")}
           </div>`
         : ""}
       <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid #f5f5f4">
@@ -678,6 +688,12 @@ function wire() {
     viewing = await api(`/recipes/${b.dataset.openRecipe}`); servings = 1; cookStep = -1; showPhotos = false; err = ""; render();
   });
   const tp = $("#togglePhotos"); if (tp) tp.onclick = () => { showPhotos = !showPhotos; render(); };
+  document.querySelectorAll("[data-lightbox]").forEach(img => img.onclick = () => {
+    const list = (viewing && viewing.photos) || [];
+    lightbox = list[+img.dataset.lightbox] || null;
+    render();
+  });
+  const lb = $("#lightbox"); if (lb) lb.onclick = () => { lightbox = null; render(); };
   document.querySelectorAll("[data-rdel]").forEach(b => b.onclick = async () => {
     await api(`/recipes/${b.dataset.rdel}`, { method: "DELETE" }); refresh();
   });

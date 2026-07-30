@@ -759,6 +759,6 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30f" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30g" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30f]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30g]`));
