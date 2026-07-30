@@ -105,20 +105,39 @@ function migrate() {
   if (!columns("recipes").includes("nutrition")) {
     db.exec("ALTER TABLE recipes ADD COLUMN nutrition TEXT DEFAULT ''");
   }
+  // pantry: expiration tracking — when it was added, how it's stored, and the
+  // per-storage shelf life (JSON: {pantry,fridge,freezer,thawed} in days).
+  const pc = columns("pantry");
+  if (!pc.includes("added")) db.exec(`ALTER TABLE pantry ADD COLUMN added INTEGER DEFAULT 0`);
+  if (!pc.includes("storage")) db.exec(`ALTER TABLE pantry ADD COLUMN storage TEXT DEFAULT ''`);
+  if (!pc.includes("shelf_life")) db.exec(`ALTER TABLE pantry ADD COLUMN shelf_life TEXT DEFAULT ''`);
 }
 migrate();
 
 // ---------- pantry API ----------
-app.get("/api/pantry", (_, res) => res.json(db.prepare("SELECT * FROM pantry ORDER BY name").all()));
+app.get("/api/pantry", (_, res) => res.json(db.prepare("SELECT * FROM pantry ORDER BY name").all()
+  .map((r) => ({ ...r, shelf_life: r.shelf_life ? JSON.parse(r.shelf_life) : null }))));
 app.post("/api/pantry", (req, res) => {
-  const { name, base = 0, base_unit = "count", pkg_label = "each", pkg_base = 1 } = req.body;
+  const { name, base = 0, base_unit = "count", pkg_label = "each", pkg_base = 1,
+    storage = "", shelf_life = null } = req.body;
   if (!name?.trim()) return res.status(400).json({ error: "name required" });
-  const info = db.prepare("INSERT INTO pantry (name,base,base_unit,pkg_label,pkg_base) VALUES (?,?,?,?,?)")
-    .run(name.trim(), base, base_unit, pkg_label, pkg_base);
+  const info = db.prepare(
+    "INSERT INTO pantry (name,base,base_unit,pkg_label,pkg_base,added,storage,shelf_life) VALUES (?,?,?,?,?,?,?,?)"
+  ).run(name.trim(), base, base_unit, pkg_label, pkg_base, Date.now(), storage,
+    shelf_life ? JSON.stringify(shelf_life) : "");
   res.json({ id: info.lastInsertRowid });
 });
 app.patch("/api/pantry/:id", (req, res) => {
-  db.prepare("UPDATE pantry SET base=? WHERE id=?").run(req.body.base, req.params.id);
+  // amount changes; may also change storage state (froze it / thawed it),
+  // and adding more of something resets the added date.
+  const cur = db.prepare("SELECT * FROM pantry WHERE id=?").get(req.params.id);
+  if (!cur) return res.status(404).json({ error: "not found" });
+  const base = req.body.base != null ? req.body.base : cur.base;
+  const storage = req.body.storage != null ? req.body.storage : cur.storage;
+  // reset the clock when restocking (more was just bought) or when re-freezing
+  const added = req.body.resetAdded ? Date.now() : cur.added;
+  db.prepare("UPDATE pantry SET base=?, storage=?, added=? WHERE id=?")
+    .run(base, storage, added, req.params.id);
   res.json({ ok: true });
 });
 app.delete("/api/pantry/:id", (req, res) => {
@@ -151,14 +170,12 @@ app.delete("/api/list/:id", (req, res) => {
 // move all checked list items into pantry (adds packages * pkg_base to stock), then clear them
 app.post("/api/purchase", (_, res) => {
   const bought = db.prepare("SELECT * FROM list WHERE checked=1").all();
-  const norm = (s) => s.toLowerCase().trim().replace(/s$/, "");
   const tx = db.transaction(() => {
     for (const b of bought) {
       const addBase = +(b.packages * b.pkg_base).toFixed(2);
-      const match = db.prepare("SELECT * FROM pantry").all().find((p) => norm(p.name) === norm(b.name));
-      if (match) db.prepare("UPDATE pantry SET base=? WHERE id=?").run(+(match.base + addBase).toFixed(2), match.id);
-      else db.prepare("INSERT INTO pantry (name,base,base_unit,pkg_label,pkg_base) VALUES (?,?,?,?,?)")
-        .run(b.name, addBase, b.base_unit, b.pkg_label, b.pkg_base);
+      // Each purchase is its own dated batch (older stock is used first).
+      db.prepare("INSERT INTO pantry (name,base,base_unit,pkg_label,pkg_base,added,storage,shelf_life) VALUES (?,?,?,?,?,?,?,?)")
+        .run(b.name, addBase, b.base_unit, b.pkg_label, b.pkg_base, Date.now(), "", "");
     }
     db.prepare("DELETE FROM list WHERE checked=1").run();
   });
@@ -166,16 +183,24 @@ app.post("/api/purchase", (_, res) => {
   res.json({ ok: true, moved: bought.length });
 });
 
-// subtract cooked recipe usage (in base units) from pantry stock
+// subtract cooked recipe usage (in base units) from pantry stock, oldest batch first
 app.post("/api/cook", (req, res) => {
   const items = req.body.items || []; // [{name, use_base}]
   const norm = (s) => s.toLowerCase().trim().replace(/s$/, "");
   const tx = db.transaction(() => {
-    const pantry = db.prepare("SELECT * FROM pantry").all();
     for (const it of items) {
-      const match = pantry.find((p) => norm(p.name) === norm(it.name));
-      if (match) db.prepare("UPDATE pantry SET base=? WHERE id=?")
-        .run(Math.max(0, +(match.base - it.use_base).toFixed(2)), match.id);
+      let need = it.use_base;
+      // draw down matching batches oldest-first, emptying each before the next
+      const batches = db.prepare("SELECT * FROM pantry ORDER BY added ASC, id ASC").all()
+        .filter((p) => norm(p.name) === norm(it.name));
+      for (const b of batches) {
+        if (need <= 0) break;
+        const take = Math.min(b.base, need);
+        const left = +(b.base - take).toFixed(2);
+        need = +(need - take).toFixed(2);
+        if (left <= 0) db.prepare("DELETE FROM pantry WHERE id=?").run(b.id); // batch used up
+        else db.prepare("UPDATE pantry SET base=? WHERE id=?").run(left, b.id);
+      }
     }
   });
   tx();
@@ -487,16 +512,21 @@ app.post("/api/pantry-photo", async (req, res) => {
 });
 
 // ---------- pantry items from a grocery receipt photo ----------
-const RECEIPT_PROMPT = `This is a grocery store receipt (a photo or PDF). Extract the FOOD/GROCERY items purchased. Return ONLY MINIFIED JSON, no prose, no markdown.
-Shape: {"items":[{"n":name,"qty":count,"b":base_unit,"amt":amount_bought,"pl":pkg_label,"pb":pkg_full}]}
-For each grocery line:
+const RECEIPT_PROMPT = `This is a grocery store receipt (a photo or PDF). Extract the purchased line items. Return ONLY MINIFIED JSON, no prose, no markdown.
+Shape: {"items":[{"n":name,"food":true_or_false,"qty":count,"b":base_unit,"amt":amount_bought,"pl":pkg_label,"pb":pkg_full}]}
+For each PRODUCT line (skip receipt metadata entirely — see below):
 - n: expand abbreviations into a plain generic item name ("GV MLK 1GAL" -> "milk", "LG EGG 18CT" -> "egg", "BNLS CHKN BRST" -> "chicken breast"). singular.
-- qty: how many of that package were bought (the quantity column; default 1)
+- food: true ONLY if this is a food or drink item that belongs in a kitchen pantry/fridge. false for everything else.
+- qty: how many packages bought (quantity column; default 1)
 - b: "g" solids | "ml" liquids | "count" whole/countable items
-- amt: total amount bought in b, across all qty (e.g. two 1-gallon milks -> 7570 ml; one 18-ct eggs -> 18 count; one 5 lb flour -> 2265 g)
+- amt: total amount bought in b across all qty (two 1-gallon milks -> 7570 ml; one 18-ct eggs -> 18 count; one 5 lb flour -> 2265 g)
 - pl: package label ("gallon","18-ct","5 lb bag","each")
-- pb: amount of b in ONE package (gallon=3785; dozen eggs=12; 18-ct eggs=18; 5 lb bag=2265)
-Rules: SKIP non-food lines — tax, subtotal, total, change, bags, payment, loyalty/discount lines, store info. If you can't tell what a line is, skip it. If no grocery items are found, return {"items":[]}.`;
+- pb: amount of b in ONE package (gallon=3785; 18-ct eggs=18; dozen=12; 5 lb bag=2265)
+
+What is food (food:true): groceries you'd cook with or eat/drink — produce, meat, dairy, eggs, bread, pantry staples, canned/frozen food, snacks, beverages, condiments, spices, baking supplies.
+What is NOT food (food:false): household & cleaning (paper towels, dish soap, detergent, trash bags, foil, sponges), personal care (shampoo, toothpaste, soap, razors, cosmetics, medicine, vitamins), pet supplies, baby non-food (diapers, wipes), alcohol/tobacco, kitchenware, batteries, magazines, gift cards, flowers, and anything you would not store as a food ingredient.
+
+Rules: COMPLETELY OMIT receipt metadata lines — tax, subtotal, total, change, tender/payment, card info, savings/coupon/discount lines, loyalty, store name/address/phone, cashier, date. Those are not items and must not appear at all. Actual products go in the list with the correct food flag. If a product line is unreadable, skip it. If nothing is found, return {"items":[]}.`;
 
 app.post("/api/receipt", async (req, res) => {
   const { image, image_type } = req.body;
@@ -529,13 +559,58 @@ app.post("/api/receipt", async (req, res) => {
     .filter((x) => x && x.n)
     .map((x) => ({
       name: x.n,
+      food: x.food !== false, // default to food unless explicitly flagged non-food
       base: typeof x.amt === "number" ? x.amt : 0,
       base_unit: ["g", "ml", "count"].includes(x.b) ? x.b : "count",
       pkg_label: x.pl || "each",
       pkg_base: typeof x.pb === "number" && x.pb > 0 ? x.pb : 1,
     }));
-  if (!items.length) return res.status(422).json({ error: "No grocery items found on that receipt. Try a clearer photo." });
+  if (!items.length) return res.status(422).json({ error: "No items found on that receipt. Try a clearer photo." });
   res.json({ items });
+});
+
+// ---------- shelf-life estimation ----------
+// Given item names, estimate typical shelf life (days) for each storage state,
+// plus the usual place you'd store it. Uses the cheap text model.
+const SHELF_PROMPT = (names) => `For each grocery item, estimate typical shelf life in DAYS for each storage state, and where it's usually kept. Return ONLY MINIFIED JSON, no prose.
+Shape: {"r":[{"n":name,"where":"pantry"|"fridge"|"freezer","pantry":days,"fridge":days,"freezer":days,"thawed":days}]}
+- where: the normal place to store this item unopened (dry goods->pantry, dairy/produce/meat->fridge, ice cream->freezer)
+- pantry/fridge/freezer: shelf life in that state from today, in days. Use null if that state doesn't apply (e.g. milk has no meaningful pantry life; flour has no freezer need but you may still give one).
+- thawed: for freezable meat/fish/etc., days it lasts in the FRIDGE after thawing (usually 1-3 for raw meat). null if not applicable.
+Examples: fresh chicken -> {"where":"fridge","pantry":null,"fridge":2,"freezer":270,"thawed":2}; milk -> {"where":"fridge","pantry":null,"fridge":7,"freezer":90,"thawed":5}; dried pasta -> {"where":"pantry","pantry":730,"fridge":null,"freezer":null,"thawed":null}; bananas -> {"where":"pantry","pantry":5,"fridge":9,"freezer":60,"thawed":null}.
+ITEMS: ${names.join(", ")}`;
+
+app.post("/api/shelf-life", async (req, res) => {
+  const names = Array.isArray(req.body.names) ? req.body.names.filter(Boolean) : [];
+  if (!process.env.ANTHROPIC_API_KEY)
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY not set on the server" });
+  if (!names.length) return res.json({ results: {} });
+  let raw;
+  try {
+    raw = (await callClaude(SHELF_PROMPT(names), 2000)).replace(/```json|```/g, "").trim();
+  } catch (e) {
+    return res.json({ results: {} }); // shelf life is best-effort; never block adding an item
+  }
+  let obj;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    const f = raw.indexOf("{"), l = raw.lastIndexOf("}");
+    try { obj = JSON.parse(raw.slice(f, l + 1)); } catch { return res.json({ results: {} }); }
+  }
+  const dOrNull = (v) => (typeof v === "number" && v > 0 ? Math.round(v) : null);
+  const results = {};
+  for (const r of (Array.isArray(obj.r) ? obj.r : [])) {
+    if (!r || !r.n) continue;
+    results[r.n.toLowerCase()] = {
+      where: ["pantry", "fridge", "freezer"].includes(r.where) ? r.where : "pantry",
+      pantry: dOrNull(r.pantry),
+      fridge: dOrNull(r.fridge),
+      freezer: dOrNull(r.freezer),
+      thawed: dOrNull(r.thawed),
+    };
+  }
+  res.json({ results });
 });
 
 // ---------- recipe parsing: accepts pasted text, a url, OR photo(s) ----------
@@ -677,6 +752,6 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30a" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30d" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30a]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30d]`));
