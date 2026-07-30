@@ -111,6 +111,7 @@ let parsedDirty = false;      // ingredient list was hand-edited since parse
 let photoImages = [];         // multiple pages: [{base64, mediaType, dataUrl}]
 let savedSort = "recent";     // "recent" | "az" | "canmake"
 let pantryPhotoBusy = false, pantryPending = null;
+let receiptBusy = false, receiptItems = null;
 
 async function refresh() {
   [pantry, list, saved] = await Promise.all([api("/pantry"), api("/list"), api("/recipes")]);
@@ -431,9 +432,32 @@ function pantryView() {
     <button class="btn btn-dark" id="padd" style="width:auto;padding:0 14px">+</button>
   </div>
   <input id="pantryPhotoInput" type="file" accept="image/*" style="display:none" />
-  <button class="btn" id="pantryPhotoBtn" ${pantryPhotoBusy ? "disabled" : ""}
-    style="background:#e7e5e4;color:#44403c;margin-bottom:12px;font-size:14px">
-    ${pantryPhotoBusy ? "Reading photo…" : "📷 Add an item by photo"}</button>`;
+  <input id="receiptInput" type="file" accept="image/*" style="display:none" />
+  <div style="display:flex;gap:8px;margin-bottom:12px">
+    <button class="btn" id="pantryPhotoBtn" ${pantryPhotoBusy || receiptBusy ? "disabled" : ""}
+      style="background:#e7e5e4;color:#44403c;font-size:14px;flex:1">
+      ${pantryPhotoBusy ? "Reading…" : "📷 Add an item"}</button>
+    <button class="btn" id="receiptBtn" ${pantryPhotoBusy || receiptBusy ? "disabled" : ""}
+      style="background:#e7e5e4;color:#44403c;font-size:14px;flex:1">
+      ${receiptBusy ? "Reading receipt…" : "🧾 Add from receipt"}</button>
+  </div>`;
+
+  if (receiptItems) {
+    html += `<div class="parsed" style="margin-bottom:14px">
+      <div class="parsed-head">Receipt — uncheck anything you don't want, edit names, then add</div>`;
+    receiptItems.forEach((it, i) => {
+      html += `<div class="pitem" style="gap:6px;align-items:center">
+        <input type="checkbox" data-ruse="${i}" ${it.use ? "checked" : ""} style="accent-color:#059669;width:16px;height:16px;flex:none" />
+        <input data-rname="${i}" value="${esc(it.name)}" style="flex:2;min-width:90px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 7px;font-size:13px" />
+        <input data-ramt="${i}" value="${esc(it.base)}" inputmode="decimal" style="width:64px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 4px;font-size:13px;text-align:center" />
+        <span class="meta" style="min-width:36px">${esc(it.base_unit)}</span>
+      </div>`;
+    });
+    html += `<div class="actions" style="padding:12px">
+        <button class="btn btn-green" id="receiptConfirm">Add ${receiptItems.filter(x => x.use).length} to pantry</button>
+        <button class="btn btn-dark" id="receiptCancel">Cancel</button>
+      </div></div>`;
+  }
 
   if (pantryPending) {
     const p = pantryPending;
@@ -572,6 +596,16 @@ function wire() {
     ppb.onclick = () => ppi.click();
     ppi.onchange = () => { if (ppi.files && ppi.files[0]) pantryFromPhoto(ppi.files[0]); ppi.value = ""; };
   }
+  const rcb = $("#receiptBtn"), rci = $("#receiptInput");
+  if (rcb && rci) {
+    rcb.onclick = () => rci.click();
+    rci.onchange = () => { if (rci.files && rci.files[0]) receiptFromPhoto(rci.files[0]); rci.value = ""; };
+  }
+  document.querySelectorAll("[data-ruse]").forEach(c => c.onchange = () => { receiptItems[+c.dataset.ruse].use = c.checked; render(); });
+  document.querySelectorAll("[data-rname]").forEach(el => el.oninput = () => { receiptItems[+el.dataset.rname].name = el.value; });
+  document.querySelectorAll("[data-ramt]").forEach(el => el.oninput = () => { receiptItems[+el.dataset.ramt].base = +el.value || 0; });
+  const rcc = $("#receiptConfirm"); if (rcc) rcc.onclick = confirmReceipt;
+  const rcx = $("#receiptCancel"); if (rcx) rcx.onclick = () => { receiptItems = null; err = ""; render(); };
   const ppn = $("#ppName"); if (ppn) ppn.oninput = () => { pantryPending.name = ppn.value; };
   const ppa = $("#ppAmt"); if (ppa) ppa.oninput = () => { pantryPending.base = +ppa.value || 0; };
   const ppc = $("#ppConfirm"); if (ppc) ppc.onclick = confirmPantryPhoto;
@@ -837,6 +871,43 @@ async function confirmPantryPhoto() {
     }}));
   }
   pantryPending = null; err = "";
+  refresh();
+}
+
+async function receiptFromPhoto(file) {
+  err = ""; receiptBusy = true; receiptItems = null; render();
+  try {
+    const { base64, mediaType } = await readAndShrinkImage(file, 1600); // receipts are text-dense; keep more detail
+    const r = await api("/receipt", J({ m: "POST", b: { image: base64, image_type: mediaType } }));
+    if (r.error) throw new Error(r.error);
+    if (!r.items || !r.items.length) throw new Error("No grocery items found on that receipt.");
+    receiptItems = r.items.map(x => ({ ...x, use: true }));
+  } catch (e) {
+    err = e && e.message ? e.message : "Couldn't read that receipt.";
+  } finally {
+    receiptBusy = false; render();
+  }
+}
+
+async function confirmReceipt() {
+  const chosen = (receiptItems || []).filter(x => x.use && x.name.trim());
+  if (!chosen.length) { receiptItems = null; render(); return; }
+  // Merge duplicate lines (same item bought twice) into one total before adding.
+  const merged = [];
+  for (const it of chosen) {
+    const m = merged.find(x => norm(x.name) === norm(it.name));
+    if (m) m.base = +(m.base + it.base).toFixed(2);
+    else merged.push({ name: it.name.trim(), base: it.base, base_unit: it.base_unit, pkg_label: it.pkg_label, pkg_base: it.pkg_base || 1 });
+  }
+  for (const it of merged) {
+    const existing = pantry.find(x => norm(x.name) === norm(it.name));
+    if (existing) {
+      await api(`/pantry/${existing.id}`, J({ m: "PATCH", b: { base: +(existing.base + it.base).toFixed(2) } }));
+    } else {
+      await api("/pantry", J({ m: "POST", b: it }));
+    }
+  }
+  receiptItems = null; err = "";
   refresh();
 }
 

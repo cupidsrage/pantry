@@ -474,6 +474,53 @@ app.post("/api/pantry-photo", async (req, res) => {
   });
 });
 
+// ---------- pantry items from a grocery receipt photo ----------
+const RECEIPT_PROMPT = `This is a photo of a grocery store receipt. Extract the FOOD/GROCERY items purchased. Return ONLY MINIFIED JSON, no prose, no markdown.
+Shape: {"items":[{"n":name,"qty":count,"b":base_unit,"amt":amount_bought,"pl":pkg_label,"pb":pkg_full}]}
+For each grocery line:
+- n: expand abbreviations into a plain generic item name ("GV MLK 1GAL" -> "milk", "LG EGG 18CT" -> "egg", "BNLS CHKN BRST" -> "chicken breast"). singular.
+- qty: how many of that package were bought (the quantity column; default 1)
+- b: "g" solids | "ml" liquids | "count" whole/countable items
+- amt: total amount bought in b, across all qty (e.g. two 1-gallon milks -> 7570 ml; one 18-ct eggs -> 18 count; one 5 lb flour -> 2265 g)
+- pl: package label ("gallon","18-ct","5 lb bag","each")
+- pb: amount of b in ONE package (gallon=3785; dozen eggs=12; 18-ct eggs=18; 5 lb bag=2265)
+Rules: SKIP non-food lines — tax, subtotal, total, change, bags, payment, loyalty/discount lines, store info. If you can't tell what a line is, skip it. If no grocery items are found, return {"items":[]}.`;
+
+app.post("/api/receipt", async (req, res) => {
+  const { image, image_type } = req.body;
+  if (!process.env.ANTHROPIC_API_KEY)
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY not set on the server" });
+  if (!image) return res.status(400).json({ error: "image required" });
+  let raw;
+  try {
+    raw = (await callClaude([
+      { type: "image", source: { type: "base64", media_type: image_type || "image/jpeg", data: image } },
+      { type: "text", text: RECEIPT_PROMPT },
+    ], 2000, VISION_MODEL)).replace(/```json|```/g, "").trim();
+  } catch (e) {
+    return res.status(422).json({ error: "Couldn't read that receipt. Try a clearer, flatter photo." });
+  }
+  let obj;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    const f = raw.indexOf("{"), l = raw.lastIndexOf("}");
+    try { obj = JSON.parse(raw.slice(f, l + 1)); }
+    catch { return res.status(422).json({ error: "Couldn't read the receipt. Try a clearer photo." }); }
+  }
+  const items = (Array.isArray(obj.items) ? obj.items : [])
+    .filter((x) => x && x.n)
+    .map((x) => ({
+      name: x.n,
+      base: typeof x.amt === "number" ? x.amt : 0,
+      base_unit: ["g", "ml", "count"].includes(x.b) ? x.b : "count",
+      pkg_label: x.pl || "each",
+      pkg_base: typeof x.pb === "number" && x.pb > 0 ? x.pb : 1,
+    }));
+  if (!items.length) return res.status(422).json({ error: "No grocery items found on that receipt. Try a clearer photo." });
+  res.json({ items });
+});
+
 // ---------- recipe parsing: accepts pasted text, a url, OR photo(s) ----------
 app.post("/api/parse", async (req, res) => {
   let { recipe, url, image, image_type, images } = req.body;
@@ -611,6 +658,6 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29w" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29x" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29w]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29x]`));
