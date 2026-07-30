@@ -335,8 +335,11 @@ async function refresh() {
 async function loadMeals() {
   if (!planWeekStart) planWeekStart = weekStartOf(new Date());
   const from = ymd(planWeekStart), to = ymd(addDays(planWeekStart, 6));
-  const r = await api(`/meals?from=${from}&to=${to}`);
+  // load meals and refresh saved recipes together so the plan's recipe dropdown
+  // (and the Saved tab) always reflect the current recipe list.
+  const [r, s] = await Promise.all([api(`/meals?from=${from}&to=${to}`), api("/recipes")]);
   meals = Array.isArray(r) ? r : [];
+  if (Array.isArray(s)) saved = s;
   render();
 }
 

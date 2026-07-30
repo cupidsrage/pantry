@@ -927,11 +927,12 @@ app.post("/api/recipes/:id/share", requireAuth, (req, res) => {
   if (me && to === me.username) return res.status(400).json({ error: "that's your own account" });
   const recipient = db.prepare("SELECT id FROM users WHERE username=?").get(to);
   if (!recipient) return res.status(404).json({ error: "no account with that username" });
-  // avoid piling up duplicates if shared repeatedly
+  // avoid piling up indistinguishable duplicates if shared repeatedly
   const dupe = db.prepare("SELECT 1 FROM recipes WHERE user_id=? AND title=?").get(recipient.id, src.title);
+  const newTitle = dupe && me ? `${src.title} (from ${me.username})` : src.title;
   // copy the recipe verbatim to the recipient (photos/nutrition/steps/times included)
   db.prepare("INSERT INTO recipes (title,source_url,ingredients,steps,created,nutrition,photos,prep_min,cook_min,user_id) VALUES (?,?,?,?,?,?,?,?,?,?)")
-    .run(src.title, src.source_url, src.ingredients, src.steps, Date.now(), src.nutrition || "", src.photos || "", src.prep_min || 0, src.cook_min || 0, recipient.id);
+    .run(newTitle, src.source_url, src.ingredients, src.steps, Date.now(), src.nutrition || "", src.photos || "", src.prep_min || 0, src.cook_min || 0, recipient.id);
   res.json({ ok: true, to, duplicate: !!dupe });
 });
 
@@ -984,6 +985,6 @@ app.delete("/api/meals/:id", requireAuth, (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30m" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30n" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30m]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30n]`));
