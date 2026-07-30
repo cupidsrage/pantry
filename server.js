@@ -179,13 +179,14 @@ app.post("/api/cook", (req, res) => {
 });
 
 // ---------- shared Anthropic call ----------
-// Sonnet 4.6 pricing per million tokens (update if you change the model).
-const PRICE_IN_PER_M = 3.0;
-const PRICE_OUT_PER_M = 15.0;
+// Haiku 4.5 pricing per million tokens (extraction doesn't need Sonnet's reasoning).
+const PARSE_MODEL = "claude-haiku-4-5-20251001";
+const PRICE_IN_PER_M = 1.0;
+const PRICE_OUT_PER_M = 5.0;
 let sessionCost = 0;
 let sessionCalls = 0;
 
-async function callClaude(prompt, maxTokens = 4000) {
+async function callClaude(prompt, maxTokens = 1500) {
   const r = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -194,7 +195,7 @@ async function callClaude(prompt, maxTokens = 4000) {
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-6",
+      model: PARSE_MODEL,
       max_tokens: maxTokens,
       messages: [{ role: "user", content: prompt }],
     }),
@@ -371,24 +372,39 @@ function extractRecipeJsonLd(html) {
   return null;
 }
 
-const PARSE_PROMPT = (recipeText) => `You extract a recipe into structured data. Return ONLY a JSON object, no prose, no markdown fences:
-{
-  "title": string,             // the recipe's name
-  "ingredients": [ {
-     "name": string,           // singular generic grocery name, e.g. "flour", "garlic", "chicken breast"
-     "use_qty": number,        // amount the recipe uses
-     "use_unit": string,       // recipe unit: "tbsp","cup","clove","whole","g","oz", etc.
-     "base_unit": "g" | "ml" | "count",   // g solids, ml liquids, count for whole items
-     "use_base": number,       // use_qty in base_unit (1 tbsp flour->8 g; 2 cloves garlic->2 count; 1 lemon->1 count)
-     "pkg_label": string,      // what you actually buy: "5 lb bag","head","bunch","1 lb","stick","each"
-     "pkg_base": number        // base_unit in ONE package (5 lb bag flour->2265 g; head garlic->10 count; bunch parsley->30 g; lemon->1 count; stick butter->113 g)
-  } ],
-  "steps": [ string ]          // ordered cooking steps, each a short plain sentence
-}
-Rules: realistic US package sizes for pkg_base. Whole items sold individually -> base_unit "count", pkg_base 1, pkg_label "each". Garlic -> count in cloves, head ~10. Combine duplicate ingredients. Skip water and plain salt/pepper "to taste" with no amount. If the text has no clear cooking steps, use an empty steps array. The text may include website navigation, ads, reviews, or comments — ignore all of that and extract only the actual recipe. If you truly cannot find a recipe, return {"title":"","ingredients":[],"steps":[]}.
+// Compact output keys keep the model's response small (output tokens cost 5x input).
+// Keys: n=name, q=use_qty, u=use_unit, b=base_unit, ub=use_base, pl=pkg_label, pb=pkg_base
+const PARSE_PROMPT = (recipeText, includeSteps) => `Extract this recipe as MINIFIED JSON. Return ONLY the JSON, no prose, no markdown, no whitespace/newlines between tokens.
+Shape: {"t":title,"i":[{"n":name,"q":use_qty,"u":unit,"b":base_unit,"ub":use_base,"pl":pkg_label,"pb":pkg_base}]${includeSteps ? ',"s":[step,...]' : ""}}
+Field meaning:
+- n: singular generic grocery name ("flour","garlic","chicken breast")
+- q: amount recipe uses (number); u: its unit ("tbsp","cup","clove","whole","g","oz")
+- b: "g" (solids) | "ml" (liquids) | "count" (whole items)
+- ub: q converted to b (1 tbsp flour=8 g; 2 cloves garlic=2 count; 1 lemon=1 count)
+- pl: what you buy ("5 lb bag","head","bunch","1 lb","stick","each")
+- pb: amount of b in ONE package (5 lb bag flour=2265; head garlic=10; bunch parsley=30; lemon=1; stick butter=113)
+${includeSteps ? "- s: ordered cooking steps, each a short plain sentence\n" : ""}Rules: realistic US package sizes. Whole items sold individually -> b "count", pb 1, pl "each". Garlic -> count in cloves, head ~10. Combine duplicates. Skip water and plain salt/pepper "to taste". Ignore any site navigation/ads/reviews in the text. If no recipe found, return {"t":"","i":[]}.
 
 RECIPE:
 ${recipeText}`;
+
+// Expand the compact keys back into the full shape the rest of the app expects.
+function expandParsed(obj, fallbackSteps) {
+  const items = Array.isArray(obj.i) ? obj.i : [];
+  return {
+    title: obj.t || "Untitled recipe",
+    ingredients: items.map((x) => ({
+      name: x.n,
+      use_qty: x.q,
+      use_unit: x.u,
+      base_unit: x.b,
+      use_base: x.ub,
+      pkg_label: x.pl,
+      pkg_base: x.pb,
+    })),
+    steps: Array.isArray(obj.s) ? obj.s : (fallbackSteps || []),
+  };
+}
 
 // ---------- recipe parsing: accepts pasted text OR a url ----------
 app.post("/api/parse", async (req, res) => {
@@ -398,6 +414,7 @@ app.post("/api/parse", async (req, res) => {
 
   try {
     let sourceUrl = "";
+    let jsonldSteps = [];
     if (url?.trim()) {
       sourceUrl = url.trim();
       let page;
@@ -414,11 +431,13 @@ app.post("/api/parse", async (req, res) => {
       // Best path: most recipe sites embed the full recipe as schema.org JSON-LD.
       const jsonld = extractRecipeJsonLd(page);
       if (jsonld) {
+        // We already have clean steps from JSON-LD — send only ingredients to the
+        // model and keep the steps ourselves, so the model doesn't re-emit them
+        // (that was the bulk of the output-token cost).
+        jsonldSteps = jsonld.instructions || [];
         recipe =
           `TITLE: ${jsonld.name || ""}\n\nINGREDIENTS:\n` +
-          (jsonld.ingredients || []).join("\n") +
-          `\n\nINSTRUCTIONS:\n` +
-          (jsonld.instructions || []).join("\n");
+          (jsonld.ingredients || []).join("\n");
       } else {
         recipe = htmlToText(page);
       }
@@ -428,7 +447,9 @@ app.post("/api/parse", async (req, res) => {
     }
     if (!recipe?.trim()) return res.status(400).json({ error: "recipe or url required" });
 
-    const raw = (await callClaude(PARSE_PROMPT(recipe))).replace(/```json|```/g, "").trim();
+    // Ask the model for steps only when we don't already have them from JSON-LD.
+    const needSteps = jsonldSteps.length === 0;
+    const raw = (await callClaude(PARSE_PROMPT(recipe, needSteps))).replace(/```json|```/g, "").trim();
     // The model should return only JSON, but guard against stray prose around it.
     let obj;
     try {
@@ -446,10 +467,11 @@ app.post("/api/parse", async (req, res) => {
         return res.status(422).json({ error: "Couldn't read the recipe structure. Try again, or paste the ingredient list plainly." });
       }
     }
+    const full = expandParsed(obj, jsonldSteps);
     res.json({
-      title: obj.title || "Untitled recipe",
-      items: Array.isArray(obj.ingredients) ? obj.ingredients : [],
-      steps: Array.isArray(obj.steps) ? obj.steps : [],
+      title: full.title,
+      items: full.ingredients,
+      steps: full.steps,
       source_url: sourceUrl,
     });
   } catch (e) {
@@ -479,6 +501,6 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29n" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29o" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29n]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29o]`));
