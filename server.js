@@ -373,44 +373,6 @@ Rules: realistic US package sizes for pkg_base. Whole items sold individually ->
 RECIPE:
 ${recipeText}`;
 
-// Diagnostic: /api/debug-parse?url=... runs the real pipeline and shows what the
-// model was given and what it returned. Remove once things work.
-app.get("/api/debug-parse", async (req, res) => {
-  const url = req.query.url;
-  if (!url) return res.status(400).json({ error: "add ?url=..." });
-  const out = {};
-  try {
-    const page = await fetchPage(url);
-    out.page_bytes = page.length;
-    const jsonld = extractRecipeJsonLd(page);
-    out.jsonld_found = Boolean(jsonld);
-    if (jsonld) {
-      out.jsonld_name = jsonld.name;
-      out.jsonld_ingredient_count = (jsonld.ingredients || []).length;
-      out.jsonld_step_count = (jsonld.instructions || []).length;
-    }
-    let recipe = jsonld
-      ? `TITLE: ${jsonld.name || ""}\n\nINGREDIENTS:\n${(jsonld.ingredients || []).join("\n")}\n\nINSTRUCTIONS:\n${(jsonld.instructions || []).join("\n")}`
-      : htmlToText(page);
-    recipe = recipe.slice(0, 8000);
-    out.assembled_head = recipe.slice(0, 400);
-    out.assembled_len = recipe.length;
-    const raw = (await callClaude(PARSE_PROMPT(recipe))).replace(/```json|```/g, "").trim();
-    out.model_raw_head = raw.slice(0, 500);
-    try {
-      const obj = JSON.parse(raw);
-      out.parsed_title = obj.title;
-      out.parsed_ingredient_count = Array.isArray(obj.ingredients) ? obj.ingredients.length : "not-array";
-      out.parsed_step_count = Array.isArray(obj.steps) ? obj.steps.length : "not-array";
-    } catch (e) {
-      out.json_parse_error = String(e.message);
-    }
-  } catch (e) {
-    out.error = String(e && e.message || e);
-  }
-  res.json(out);
-});
-
 // ---------- recipe parsing: accepts pasted text OR a url ----------
 app.post("/api/parse", async (req, res) => {
   let { recipe, url } = req.body;
@@ -500,35 +462,6 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29j" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29l" }));
 
-// Diagnostic: /api/debug-fetch?url=... reports exactly what each fetch path does.
-// Safe to leave in — it never exposes your key, only whether one is present.
-app.get("/api/debug-fetch", async (req, res) => {
-  const url = req.query.url;
-  if (!url) return res.status(400).json({ error: "add ?url=..." });
-  const out = {
-    scraper_configured: scraperConfigured(),
-    has_SCRAPER_KEY: Boolean(process.env.SCRAPER_KEY),
-    has_SCRAPER_URL: Boolean(process.env.SCRAPER_URL),
-    has_legacy_SCRAPER_API_KEY: Boolean(process.env.SCRAPER_API_KEY),
-  };
-  try {
-    const d = await directFetch(url);
-    out.direct = { status: d.status, bytes: d.body ? d.body.length : 0, jsonld: Boolean(extractRecipeJsonLd(d.body)) };
-  } catch (e) {
-    out.direct = { error: String(e && e.message || e) };
-  }
-  if (scraperConfigured()) {
-    try {
-      const s = await scraperFetch(url);
-      out.scraper = { status: s.status, bytes: s.body ? s.body.length : 0, jsonld: Boolean(extractRecipeJsonLd(s.body)) };
-      out.scraper_body_head = (s.body || "").slice(0, 300);
-    } catch (e) {
-      out.scraper = { error: String(e && e.message || e) };
-    }
-  }
-  res.json(out);
-});
-
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29j]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29l]`));

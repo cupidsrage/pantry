@@ -73,6 +73,26 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':
 const wm = n => `https://www.walmart.com/search?q=${encodeURIComponent(n)}`;
 const J = o => ({ method: o.m, headers: { "content-type": "application/json" }, body: JSON.stringify(o.b) });
 
+// Purchase units the user can pick, each mapping to a base unit (g / ml / count)
+// with a factor: amount * factor = base amount. label is what shows in the dropdown.
+const UNITS = [
+  { key: "count",  label: "count / each", base: "count", factor: 1 },
+  { key: "g",      label: "grams (g)",    base: "g",     factor: 1 },
+  { key: "kg",     label: "kilograms (kg)", base: "g",   factor: 1000 },
+  { key: "oz",     label: "ounces (oz)",  base: "g",     factor: 28.35 },
+  { key: "lb",     label: "pounds (lb)",  base: "g",     factor: 453.6 },
+  { key: "ml",     label: "milliliters (ml)", base: "ml", factor: 1 },
+  { key: "l",      label: "liters (L)",   base: "ml",    factor: 1000 },
+  { key: "floz",   label: "fluid oz",     base: "ml",    factor: 29.57 },
+  { key: "cup",    label: "cups",         base: "ml",    factor: 236.6 },
+  { key: "tbsp",   label: "tablespoons",  base: "ml",    factor: 14.79 },
+  { key: "tsp",    label: "teaspoons",    base: "ml",    factor: 4.93 },
+  { key: "stick",  label: "sticks butter", base: "g",   factor: 113 },
+  { key: "can",    label: "cans (~400g)", base: "g",     factor: 400 },
+  { key: "clove",  label: "cloves",       base: "count", factor: 1 },
+];
+const unitByKey = (k) => UNITS.find(u => u.key === k) || UNITS[0];
+
 function showBase(base, unit) {
   if (unit === "count") return `${+base.toFixed(1)}`;
   if (unit === "g") return base >= 1000 ? `${(base/1000).toFixed(2)} kg` : `${Math.round(base)} g`;
@@ -287,8 +307,8 @@ function pantryView() {
   let html = `<div class="addbar">
     <input id="pname" placeholder="Item" style="flex:1;min-width:120px" />
     <input id="pamt" placeholder="Amount" type="number" style="width:90px" />
-    <select id="punit" style="padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:14px">
-      <option value="count">count</option><option value="g">g</option><option value="ml">ml</option>
+    <select id="punit" style="padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:14px;max-width:130px">
+      ${UNITS.map(u => `<option value="${u.key}">${u.label}</option>`).join("")}
     </select>
     <button class="btn btn-dark" id="padd" style="width:auto;padding:0 14px">+</button>
   </div>`;
@@ -463,11 +483,20 @@ async function cook(items) {
 }
 
 async function addPantry() {
-  const name = $("#pname").value, amt = +$("#pamt").value || 0, unit = $("#punit").value;
+  const name = $("#pname").value, amt = +$("#pamt").value || 0, unitKey = $("#punit").value;
   if (!name.trim()) return;
+  const u = unitByKey(unitKey);
+  const baseAmt = +(amt * u.factor).toFixed(2);   // convert to g / ml / count
   const existing = pantry.find(x => norm(x.name) === norm(name));
-  if (existing) await api(`/pantry/${existing.id}`, J({ m: "PATCH", b: { base: +(existing.base + amt).toFixed(2) } }));
-  else await api("/pantry", J({ m: "POST", b: { name, base: amt, base_unit: unit, pkg_label: unit === "count" ? "each" : "1 pkg", pkg_base: amt || 1 } }));
+  if (existing) {
+    await api(`/pantry/${existing.id}`, J({ m: "PATCH", b: { base: +(existing.base + baseAmt).toFixed(2) } }));
+  } else {
+    // package size = the amount just entered, so "≈1 pkg" reads sensibly; label from the unit
+    const label = u.key === "count" ? "each" : `${amt} ${u.key}`;
+    await api("/pantry", J({ m: "POST", b: {
+      name, base: baseAmt, base_unit: u.base, pkg_label: label, pkg_base: baseAmt || 1
+    }}));
+  }
   refresh();
 }
 
