@@ -868,7 +868,25 @@ app.delete("/api/recipes/:id", requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30h" }));
+// Share a saved recipe with another account: copies it into their recipes.
+app.post("/api/recipes/:id/share", requireAuth, (req, res) => {
+  const to = (req.body.username || "").trim().toLowerCase();
+  if (!to) return res.status(400).json({ error: "recipient username required" });
+  const src = db.prepare("SELECT * FROM recipes WHERE id=? AND user_id=?").get(req.params.id, req.userId);
+  if (!src) return res.status(404).json({ error: "recipe not found" });
+  const me = db.prepare("SELECT username FROM users WHERE id=?").get(req.userId);
+  if (me && to === me.username) return res.status(400).json({ error: "that's your own account" });
+  const recipient = db.prepare("SELECT id FROM users WHERE username=?").get(to);
+  if (!recipient) return res.status(404).json({ error: "no account with that username" });
+  // avoid piling up duplicates if shared repeatedly
+  const dupe = db.prepare("SELECT 1 FROM recipes WHERE user_id=? AND title=?").get(recipient.id, src.title);
+  // copy the recipe verbatim to the recipient (photos/nutrition/steps included)
+  db.prepare("INSERT INTO recipes (title,source_url,ingredients,steps,created,nutrition,photos,user_id) VALUES (?,?,?,?,?,?,?,?)")
+    .run(src.title, src.source_url, src.ingredients, src.steps, Date.now(), src.nutrition || "", src.photos || "", recipient.id);
+  res.json({ ok: true, to, duplicate: !!dupe });
+});
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30h]`));
+const PORT = process.env.PORT || 3000;
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30i" }));
+
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30i]`));

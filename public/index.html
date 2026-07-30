@@ -175,6 +175,7 @@ let parsedDirty = false;      // ingredient list was hand-edited since parse
 let photoImages = [];         // multiple pages: [{base64, mediaType, dataUrl}]
 let savedSort = "recent";     // "recent" | "az" | "canmake" | "expiring"
 let showPhotos = false;       // detail view: original photos expanded
+let shareOpen = false, shareMsg = "", shareMsgTone = "#059669";
 let lightbox = null;          // data URL of a photo shown full-screen, or null
 let pantryPhotoBusy = false, pantryPending = null;
 let receiptBusy = false, receiptItems = null;
@@ -489,6 +490,17 @@ function recipeDetailView() {
           <button class="btn btn-sky" id="rToListAll">Add all → List</button>
         </div>
         <button class="btn btn-dark" id="rCook" style="margin-top:8px">Cooked it → subtract stock</button>
+        ${shareOpen ? `
+          <div style="margin-top:10px;padding-top:10px;border-top:1px solid #e7e5e4">
+            <div class="meta" style="font-weight:600;margin-bottom:6px">Share this recipe with another account</div>
+            <div style="display:flex;gap:8px">
+              <input id="shareUser" placeholder="their username" autocapitalize="none" autocorrect="off"
+                style="flex:1;padding:9px 12px;border:1px solid #d6d3d1;border-radius:10px;font-size:14px" />
+              <button class="btn btn-green" id="shareGo" style="width:auto;padding:0 16px">Send</button>
+            </div>
+            ${shareMsg ? `<p class="meta" style="margin-top:6px;color:${shareMsgTone}">${esc(shareMsg)}</p>` : ""}
+          </div>`
+          : `<button class="btn" id="shareOpenBtn" style="margin-top:8px;background:#e7e5e4;color:#44403c">📤 Share recipe</button>`}
       </div>
     </div>`;
 }
@@ -699,8 +711,11 @@ function wire() {
   // saved tab
   document.querySelectorAll("[data-sort]").forEach(b => b.onclick = () => { savedSort = b.dataset.sort; render(); });
   document.querySelectorAll("[data-open-recipe]").forEach(b => b.onclick = async () => {
-    viewing = await api(`/recipes/${b.dataset.openRecipe}`); servings = 1; cookStep = -1; showPhotos = false; err = ""; render();
+    viewing = await api(`/recipes/${b.dataset.openRecipe}`); servings = 1; cookStep = -1; showPhotos = false; shareOpen = false; shareMsg = ""; err = ""; render();
   });
+  const so = $("#shareOpenBtn"); if (so) so.onclick = () => { shareOpen = true; shareMsg = ""; render(); };
+  const sg = $("#shareGo"); if (sg) sg.onclick = shareRecipe;
+  const shu = $("#shareUser"); if (shu) shu.onkeydown = e => { if (e.key === "Enter") shareRecipe(); };
   const tp = $("#togglePhotos"); if (tp) tp.onclick = () => { showPhotos = !showPhotos; render(); };
   document.querySelectorAll("[data-lightbox]").forEach(img => img.onclick = () => {
     const list = (viewing && viewing.photos) || [];
@@ -985,6 +1000,20 @@ async function saveManualRecipe() {
     parsing = false;
     if (err) render();
   }
+}
+
+async function shareRecipe() {
+  const username = (($("#shareUser") || {}).value || "").trim();
+  if (!username) { shareMsg = "Enter a username."; shareMsgTone = "#dc2626"; render(); return; }
+  if (!viewing) return;
+  const r = await api(`/recipes/${viewing.id}/share`, J({ m: "POST", b: { username } }));
+  if (r.error) { shareMsg = r.error; shareMsgTone = "#dc2626"; render(); return; }
+  shareMsg = r.duplicate
+    ? `Sent to ${r.to} (they already had one with this name, so now they have both).`
+    : `Sent to ${r.to} — it's in their saved recipes.`;
+  shareMsgTone = "#059669";
+  shareOpen = true; // keep the panel open to show the confirmation
+  render();
 }
 
 async function saveRecipe() {
