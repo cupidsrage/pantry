@@ -428,6 +428,52 @@ function expandParsed(obj, fallbackSteps) {
   };
 }
 
+// ---------- pantry item from a photo ----------
+// Identify a grocery item and estimate how much is present (fullness / count).
+const PANTRY_PHOTO_PROMPT = `Identify the single main grocery item in this photo and estimate how much is present. Return ONLY MINIFIED JSON, no prose, no markdown.
+Shape: {"n":name,"b":base_unit,"amt":amount_present,"pl":pkg_label,"pb":pkg_full}
+- n: generic grocery name, singular ("milk","egg","flour","orange juice")
+- b: "g" solids | "ml" liquids | "count" whole/countable items (eggs, apples, cans)
+- amt: how much is PRESENT now, in b. Estimate from what you can see:
+  * a liquid container (milk jug, juice): estimate fullness and convert to ml (gallon=3785 ml, half gallon=1893, quart=946, liter=1000). A jug that looks ~half full of a gallon = ~1900.
+  * a carton/box of countable items: COUNT the visible items (eggs in a carton, etc.) and use that number with b="count".
+  * a bag/box of solid (flour, sugar, rice): estimate remaining weight in g from the package size and how full it looks.
+- pl: the package label ("gallon","dozen","5 lb bag","each")
+- pb: amount of b in a FULL package (gallon milk=3785; dozen eggs=12; 5 lb bag=2265)
+If you cannot identify a grocery item, return {"n":""}.`;
+
+app.post("/api/pantry-photo", async (req, res) => {
+  const { image, image_type } = req.body;
+  if (!process.env.ANTHROPIC_API_KEY)
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY not set on the server" });
+  if (!image) return res.status(400).json({ error: "image required" });
+  let raw;
+  try {
+    raw = (await callClaude([
+      { type: "image", source: { type: "base64", media_type: image_type || "image/jpeg", data: image } },
+      { type: "text", text: PANTRY_PHOTO_PROMPT },
+    ], 500, VISION_MODEL)).replace(/```json|```/g, "").trim();
+  } catch (e) {
+    return res.status(422).json({ error: "Couldn't read that photo. Try a clearer, well-lit picture." });
+  }
+  let obj;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    const f = raw.indexOf("{"), l = raw.lastIndexOf("}");
+    try { obj = JSON.parse(raw.slice(f, l + 1)); }
+    catch { return res.status(422).json({ error: "Couldn't identify the item. Try a clearer picture." }); }
+  }
+  if (!obj.n) return res.status(422).json({ error: "Couldn't identify a grocery item in that photo." });
+  res.json({
+    name: obj.n,
+    base: typeof obj.amt === "number" ? obj.amt : 0,
+    base_unit: ["g", "ml", "count"].includes(obj.b) ? obj.b : "count",
+    pkg_label: obj.pl || "each",
+    pkg_base: typeof obj.pb === "number" && obj.pb > 0 ? obj.pb : 1,
+  });
+});
+
 // ---------- recipe parsing: accepts pasted text, a url, OR photo(s) ----------
 app.post("/api/parse", async (req, res) => {
   let { recipe, url, image, image_type, images } = req.body;
@@ -565,6 +611,6 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29v" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29w" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29v]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29w]`));

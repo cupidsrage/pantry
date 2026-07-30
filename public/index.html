@@ -110,6 +110,7 @@ let manualName = "", manualIngredients = "", manualDirections = "";
 let parsedDirty = false;      // ingredient list was hand-edited since parse
 let photoImages = [];         // multiple pages: [{base64, mediaType, dataUrl}]
 let savedSort = "recent";     // "recent" | "az" | "canmake"
+let pantryPhotoBusy = false, pantryPending = null;
 
 async function refresh() {
   [pantry, list, saved] = await Promise.all([api("/pantry"), api("/list"), api("/recipes")]);
@@ -428,7 +429,29 @@ function pantryView() {
       ${UNITS.map(u => `<option value="${u.key}">${u.label}</option>`).join("")}
     </select>
     <button class="btn btn-dark" id="padd" style="width:auto;padding:0 14px">+</button>
-  </div>`;
+  </div>
+  <input id="pantryPhotoInput" type="file" accept="image/*" style="display:none" />
+  <button class="btn" id="pantryPhotoBtn" ${pantryPhotoBusy ? "disabled" : ""}
+    style="background:#e7e5e4;color:#44403c;margin-bottom:12px;font-size:14px">
+    ${pantryPhotoBusy ? "Reading photo…" : "📷 Add an item by photo"}</button>`;
+
+  if (pantryPending) {
+    const p = pantryPending;
+    html += `<div class="parsed" style="margin-bottom:14px">
+      <div class="parsed-head">Found this — adjust if needed, then add</div>
+      <div class="pitem" style="gap:6px;align-items:center;flex-wrap:wrap">
+        <input id="ppName" value="${esc(p.name)}" style="flex:2;min-width:100px;border:1px solid #e7e5e4;border-radius:6px;padding:6px 8px;font-size:14px" />
+        <input id="ppAmt" value="${esc(p.base)}" inputmode="decimal" style="width:70px;border:1px solid #e7e5e4;border-radius:6px;padding:6px;font-size:14px;text-align:center" />
+        <span class="meta" style="min-width:40px">${esc(p.base_unit)}</span>
+        <span class="meta">≈ ${p.pkg_base ? (p.base / p.pkg_base).toFixed(1) : "?"} ${esc(p.pkg_label)}</span>
+      </div>
+      <div class="actions" style="padding:12px">
+        <button class="btn btn-green" id="ppConfirm">Add to pantry</button>
+        <button class="btn btn-dark" id="ppCancel">Cancel</button>
+      </div>
+    </div>`;
+  }
+  if (err && tab === "pantry") html += `<p class="err">${esc(err)}</p>`;
   if (!pantry.length) html += `<p class="empty">Pantry is empty. Purchased items land here automatically.</p>`;
   else html += pantry.map(it => {
     const pk = pkgsFromBase(it.base, it.pkg_base);
@@ -544,6 +567,15 @@ function wire() {
   });
 
   const pa = $("#padd"); if (pa) pa.onclick = addPantry;
+  const ppb = $("#pantryPhotoBtn"), ppi = $("#pantryPhotoInput");
+  if (ppb && ppi) {
+    ppb.onclick = () => ppi.click();
+    ppi.onchange = () => { if (ppi.files && ppi.files[0]) pantryFromPhoto(ppi.files[0]); ppi.value = ""; };
+  }
+  const ppn = $("#ppName"); if (ppn) ppn.oninput = () => { pantryPending.name = ppn.value; };
+  const ppa = $("#ppAmt"); if (ppa) ppa.oninput = () => { pantryPending.base = +ppa.value || 0; };
+  const ppc = $("#ppConfirm"); if (ppc) ppc.onclick = confirmPantryPhoto;
+  const ppx = $("#ppCancel"); if (ppx) ppx.onclick = () => { pantryPending = null; err = ""; render(); };
   document.querySelectorAll("[data-pqty]").forEach(b => b.onclick = async () => {
     const it = pantry.find(x => x.id == b.dataset.pqty);
     const nb = Math.max(0, +(it.base + (+b.dataset.d) * it.pkg_base).toFixed(2));
@@ -776,6 +808,35 @@ async function addPantry() {
       name, base: baseAmt, base_unit: u.base, pkg_label: label, pkg_base: baseAmt || 1
     }}));
   }
+  refresh();
+}
+
+async function pantryFromPhoto(file) {
+  err = ""; pantryPhotoBusy = true; pantryPending = null; render();
+  try {
+    const { base64, mediaType } = await readAndShrinkImage(file);
+    const r = await api("/pantry-photo", J({ m: "POST", b: { image: base64, image_type: mediaType } }));
+    if (r.error) throw new Error(r.error);
+    pantryPending = { name: r.name, base: r.base, base_unit: r.base_unit, pkg_label: r.pkg_label, pkg_base: r.pkg_base };
+  } catch (e) {
+    err = e && e.message ? e.message : "Couldn't read that photo.";
+  } finally {
+    pantryPhotoBusy = false; render();
+  }
+}
+
+async function confirmPantryPhoto() {
+  const p = pantryPending;
+  if (!p || !p.name.trim()) { err = "Give the item a name."; render(); return; }
+  const existing = pantry.find(x => norm(x.name) === norm(p.name));
+  if (existing) {
+    await api(`/pantry/${existing.id}`, J({ m: "PATCH", b: { base: +(existing.base + p.base).toFixed(2) } }));
+  } else {
+    await api("/pantry", J({ m: "POST", b: {
+      name: p.name.trim(), base: p.base, base_unit: p.base_unit, pkg_label: p.pkg_label, pkg_base: p.pkg_base || 1
+    }}));
+  }
+  pantryPending = null; err = "";
   refresh();
 }
 
