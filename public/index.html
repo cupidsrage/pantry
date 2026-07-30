@@ -446,11 +446,13 @@ function pantryView() {
     html += `<div class="parsed" style="margin-bottom:14px">
       <div class="parsed-head">Receipt — uncheck anything you don't want, edit names, then add</div>`;
     receiptItems.forEach((it, i) => {
+      const pkgs = it.pkg_base > 0 ? +(it.base / it.pkg_base).toFixed(2) : it.base;
       html += `<div class="pitem" style="gap:6px;align-items:center">
         <input type="checkbox" data-ruse="${i}" ${it.use ? "checked" : ""} style="accent-color:#059669;width:16px;height:16px;flex:none" />
-        <input data-rname="${i}" value="${esc(it.name)}" style="flex:2;min-width:90px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 7px;font-size:13px" />
-        <input data-ramt="${i}" value="${esc(it.base)}" inputmode="decimal" style="width:64px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 4px;font-size:13px;text-align:center" />
-        <span class="meta" style="min-width:36px">${esc(it.base_unit)}</span>
+        <input data-rname="${i}" value="${esc(it.name)}" style="flex:2;min-width:80px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 7px;font-size:13px" />
+        <input data-rpkg="${i}" value="${esc(pkgs)}" inputmode="decimal" title="how many you bought"
+          style="width:48px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 4px;font-size:13px;text-align:center" />
+        <span class="meta" style="min-width:52px;max-width:80px">${esc(it.pkg_label || "each")}</span>
       </div>`;
     });
     html += `<div class="actions" style="padding:12px">
@@ -603,7 +605,11 @@ function wire() {
   }
   document.querySelectorAll("[data-ruse]").forEach(c => c.onchange = () => { receiptItems[+c.dataset.ruse].use = c.checked; render(); });
   document.querySelectorAll("[data-rname]").forEach(el => el.oninput = () => { receiptItems[+el.dataset.rname].name = el.value; });
-  document.querySelectorAll("[data-ramt]").forEach(el => el.oninput = () => { receiptItems[+el.dataset.ramt].base = +el.value || 0; });
+  document.querySelectorAll("[data-rpkg]").forEach(el => el.oninput = () => {
+    const it = receiptItems[+el.dataset.rpkg];
+    const pkgs = +el.value || 0;
+    it.base = +(pkgs * (it.pkg_base || 1)).toFixed(2); // packages → base amount for storage
+  });
   const rcc = $("#receiptConfirm"); if (rcc) rcc.onclick = confirmReceipt;
   const rcx = $("#receiptCancel"); if (rcx) rcx.onclick = () => { receiptItems = null; err = ""; render(); };
   const ppn = $("#ppName"); if (ppn) ppn.oninput = () => { pantryPending.name = ppn.value; };
