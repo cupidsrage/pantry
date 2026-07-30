@@ -275,12 +275,27 @@ async function scraperFetch(url) {
 
 const isBlocked = (status) => status === 403 || status === 429 || status === 401 || status >= 500;
 
+// A response can be HTTP 200 but still be a block/challenge/access-denied page.
+// Real recipe pages are large and contain recipe markers; block pages are tiny
+// and often mention "access", "denied", "blocked", "captcha", etc.
+function looksLikeRealPage(body) {
+  if (!body || body.length < 2000) return false; // block pages are small
+  const head = body.slice(0, 4000).toLowerCase();
+  const blockSignals = ["access issue", "access denied", "are you a robot", "captcha",
+    "verify you are human", "unusual traffic", "request blocked", "cloudflare",
+    "please contact support", "enable javascript and cookies"];
+  if (blockSignals.some((s) => head.includes(s))) return false;
+  // prefer pages that actually smell like a recipe / rich HTML
+  const good = ['application/ld+json', 'recipeingredient', 'recipe', 'ingredient', '<!doctype html'];
+  return good.some((s) => head.includes(s));
+}
+
 async function fetchPage(url) {
-  // 1) direct
+  // 1) direct — accept only if it clearly looks like a real page, not a block screen
   let direct;
   try {
     direct = await directFetch(url);
-    if (!isBlocked(direct.status) && direct.body && direct.body.length > 200) return direct.body;
+    if (!isBlocked(direct.status) && looksLikeRealPage(direct.body)) return direct.body;
   } catch {
     /* fall through to scraper */
   }
@@ -293,8 +308,8 @@ async function fetchPage(url) {
       /* fall through to error */
     }
   }
-  // if direct returned *something* usable despite a soft-block status, use it as last resort
-  if (direct && direct.body && direct.body.length > 200) return direct.body;
+  // last resort: a direct body that at least had real size, even if unsure
+  if (direct && looksLikeRealPage(direct.body)) return direct.body;
   throw new Error("blocked");
 }
 
@@ -485,7 +500,7 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29i" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29j" }));
 
 // Diagnostic: /api/debug-fetch?url=... reports exactly what each fetch path does.
 // Safe to leave in — it never exposes your key, only whether one is present.
@@ -516,4 +531,4 @@ app.get("/api/debug-fetch", async (req, res) => {
   res.json(out);
 });
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29i]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29j]`));
