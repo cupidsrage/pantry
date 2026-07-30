@@ -179,7 +179,7 @@ app.post("/api/cook", (req, res) => {
 });
 
 // ---------- shared Anthropic call ----------
-async function callClaude(prompt, maxTokens = 2000) {
+async function callClaude(prompt, maxTokens = 4000) {
   const r = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -194,7 +194,13 @@ async function callClaude(prompt, maxTokens = 2000) {
     }),
   });
   const data = await r.json();
-  return (data.content || []).filter((i) => i.type === "text").map((i) => i.text).join("");
+  if (data.error) {
+    console.error("Anthropic API error:", JSON.stringify(data.error).slice(0, 300));
+    throw new Error("anthropic: " + (data.error.message || data.error.type || "unknown"));
+  }
+  const text = (data.content || []).filter((i) => i.type === "text").map((i) => i.text).join("");
+  if (!text) console.error("Anthropic returned no text. stop_reason:", data.stop_reason);
+  return text;
 }
 
 // strip a fetched HTML page down to readable text for the model
@@ -352,6 +358,44 @@ Rules: realistic US package sizes for pkg_base. Whole items sold individually ->
 RECIPE:
 ${recipeText}`;
 
+// Diagnostic: /api/debug-parse?url=... runs the real pipeline and shows what the
+// model was given and what it returned. Remove once things work.
+app.get("/api/debug-parse", async (req, res) => {
+  const url = req.query.url;
+  if (!url) return res.status(400).json({ error: "add ?url=..." });
+  const out = {};
+  try {
+    const page = await fetchPage(url);
+    out.page_bytes = page.length;
+    const jsonld = extractRecipeJsonLd(page);
+    out.jsonld_found = Boolean(jsonld);
+    if (jsonld) {
+      out.jsonld_name = jsonld.name;
+      out.jsonld_ingredient_count = (jsonld.ingredients || []).length;
+      out.jsonld_step_count = (jsonld.instructions || []).length;
+    }
+    let recipe = jsonld
+      ? `TITLE: ${jsonld.name || ""}\n\nINGREDIENTS:\n${(jsonld.ingredients || []).join("\n")}\n\nINSTRUCTIONS:\n${(jsonld.instructions || []).join("\n")}`
+      : htmlToText(page);
+    recipe = recipe.slice(0, 8000);
+    out.assembled_head = recipe.slice(0, 400);
+    out.assembled_len = recipe.length;
+    const raw = (await callClaude(PARSE_PROMPT(recipe))).replace(/```json|```/g, "").trim();
+    out.model_raw_head = raw.slice(0, 500);
+    try {
+      const obj = JSON.parse(raw);
+      out.parsed_title = obj.title;
+      out.parsed_ingredient_count = Array.isArray(obj.ingredients) ? obj.ingredients.length : "not-array";
+      out.parsed_step_count = Array.isArray(obj.steps) ? obj.steps.length : "not-array";
+    } catch (e) {
+      out.json_parse_error = String(e.message);
+    }
+  } catch (e) {
+    out.error = String(e && e.message || e);
+  }
+  res.json(out);
+});
+
 // ---------- recipe parsing: accepts pasted text OR a url ----------
 app.post("/api/parse", async (req, res) => {
   let { recipe, url } = req.body;
@@ -384,6 +428,7 @@ app.post("/api/parse", async (req, res) => {
       } else {
         recipe = htmlToText(page);
       }
+      recipe = recipe.slice(0, 8000); // keep the prompt well within token limits
       if (recipe.replace(/\s/g, "").length < 40)
         return res.status(400).json({ error: "Couldn't find a recipe on that page. Paste the text instead." });
     }
@@ -440,7 +485,7 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29h" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29i" }));
 
 // Diagnostic: /api/debug-fetch?url=... reports exactly what each fetch path does.
 // Safe to leave in — it never exposes your key, only whether one is present.
@@ -471,4 +516,4 @@ app.get("/api/debug-fetch", async (req, res) => {
   res.json(out);
 });
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29h]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29i]`));
