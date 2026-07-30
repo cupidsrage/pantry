@@ -5,7 +5,7 @@ import { dirname, join } from "path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
-app.use(express.json({ limit: "12mb" })); // photos arrive as base64 in the body
+app.use(express.json({ limit: "25mb" })); // photos arrive as base64 in the body
 app.use(
   express.static(join(__dirname, "public"), {
     setHeaders(res, path) {
@@ -415,24 +415,35 @@ function expandParsed(obj, fallbackSteps) {
   };
 }
 
-// ---------- recipe parsing: accepts pasted text, a url, OR a photo ----------
+// ---------- recipe parsing: accepts pasted text, a url, OR photo(s) ----------
 app.post("/api/parse", async (req, res) => {
-  let { recipe, url, image, image_type } = req.body;
+  let { recipe, url, image, image_type, images } = req.body;
   if (!process.env.ANTHROPIC_API_KEY)
     return res.status(500).json({ error: "ANTHROPIC_API_KEY not set on the server" });
 
   try {
-    // Photo of a recipe card: send the image to the vision model to read.
-    if (image) {
-      const media = image_type || "image/jpeg";
+    // Photo(s) of a recipe card: send to the vision model to read.
+    // Accept either a single `image` or an array `images` (multi-page).
+    const imgs = Array.isArray(images) && images.length
+      ? images.map((im) => ({ data: im.data, media: im.media_type || "image/jpeg" }))
+      : image ? [{ data: image, media: image_type || "image/jpeg" }] : [];
+    if (imgs.length) {
+      const blocks = imgs.map((im) => ({
+        type: "image",
+        source: { type: "base64", media_type: im.media, data: im.data },
+      }));
+      const note = imgs.length > 1
+        ? `(the recipe spans the ${imgs.length} attached images/pages — read them all in order and combine into ONE recipe)`
+        : "(the recipe is in the attached image — read the handwriting/text and extract it)";
       let raw;
       try {
-        raw = (await callClaude([
-          { type: "image", source: { type: "base64", media_type: media, data: image } },
-          { type: "text", text: PARSE_PROMPT("(the recipe is in the attached image — read the handwriting/text and extract it)", true) },
-        ], 2000, VISION_MODEL)).replace(/```json|```/g, "").trim();
+        raw = (await callClaude(
+          [...blocks, { type: "text", text: PARSE_PROMPT(note, true) }],
+          2000,
+          VISION_MODEL
+        )).replace(/```json|```/g, "").trim();
       } catch (e) {
-        return res.status(422).json({ error: "Couldn't read that photo. Try a clearer, well-lit picture." });
+        return res.status(422).json({ error: "Couldn't read those photos. Try clearer, well-lit pictures." });
       }
       let obj;
       try {
@@ -440,11 +451,11 @@ app.post("/api/parse", async (req, res) => {
       } catch {
         const f = raw.indexOf("{"), l = raw.lastIndexOf("}");
         try { obj = JSON.parse(raw.slice(f, l + 1)); }
-        catch { return res.status(422).json({ error: "Couldn't read the recipe from that photo. Try a clearer picture, or type it in." }); }
+        catch { return res.status(422).json({ error: "Couldn't read the recipe from those photos. Try clearer pictures, or type it in." }); }
       }
       const full = expandParsed(obj, []);
       if (!full.ingredients.length)
-        return res.status(422).json({ error: "No ingredients found in that photo. Try a clearer picture, or type it in." });
+        return res.status(422).json({ error: "No ingredients found in those photos. Try clearer pictures, or type it in." });
       return res.json({ title: full.title, items: full.ingredients, steps: full.steps, source_url: "" });
     }
 
@@ -536,6 +547,6 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29t" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29u" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29t]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29u]`));

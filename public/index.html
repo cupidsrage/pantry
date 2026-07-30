@@ -107,7 +107,8 @@ let saved = [], viewing = null, servings = 1, cookStep = -1;
 let shopping = false;
 let recipeMode = "import";  // "import" (link/paste), "manual", or "photo"
 let manualName = "", manualIngredients = "", manualDirections = "";
-let photoPreview = "";
+let parsedDirty = false;      // ingredient list was hand-edited since parse
+let photoImages = [];         // multiple pages: [{base64, mediaType, dataUrl}]
 
 async function refresh() {
   [pantry, list, saved] = await Promise.all([api("/pantry"), api("/list"), api("/recipes")]);
@@ -156,13 +157,23 @@ function recipeView() {
   }
 
   if (recipeMode === "photo") {
+    const thumbs = photoImages.map((im, i) => `
+      <div style="position:relative;display:inline-block;margin:4px">
+        <img src="${im.dataUrl}" style="width:70px;height:70px;object-fit:cover;border-radius:8px;border:1px solid #d6d3d1" />
+        <button class="ic del" data-photodel="${i}" title="remove"
+          style="position:absolute;top:-8px;right:-8px;background:#fff;border:1px solid #d6d3d1;border-radius:50%;width:20px;height:20px;font-size:11px;line-height:1">✕</button>
+        <span style="position:absolute;bottom:2px;left:2px;background:rgba(0,0,0,.6);color:#fff;font-size:10px;padding:1px 4px;border-radius:4px">${i + 1}</span>
+      </div>`).join("");
     html += `
-      <div style="border:2px dashed #d6d3d1;border-radius:14px;padding:28px 16px;text-align:center;margin-bottom:12px">
-        <p class="meta" style="margin-bottom:14px">Take or upload a photo of a recipe card — handwritten or printed.</p>
+      <div style="border:2px dashed #d6d3d1;border-radius:14px;padding:22px 16px;text-align:center;margin-bottom:12px">
+        <p class="meta" style="margin-bottom:14px">Photograph a recipe card — handwritten or printed. Add more than one for a multi-page recipe.</p>
         <input id="photoInput" type="file" accept="image/*" style="display:none" />
-        <button class="btn btn-green" id="photoPick" ${parsing ? "disabled" : ""} style="max-width:260px;margin:0 auto">
-          ${parsing ? "Reading photo…" : "📷 Choose / take photo"}</button>
-        ${photoPreview ? `<div style="margin-top:14px"><img src="${photoPreview}" style="max-width:100%;max-height:220px;border-radius:10px" /></div>` : ""}
+        ${thumbs ? `<div style="margin-bottom:12px">${thumbs}</div>` : ""}
+        <button class="btn" id="photoPick" ${parsing ? "disabled" : ""}
+          style="max-width:260px;margin:0 auto 8px;background:#e7e5e4;color:#44403c">
+          ${photoImages.length ? "+ Add another page" : "📷 Choose / take photo"}</button>
+        ${photoImages.length ? `<button class="btn btn-green" id="photoRead" ${parsing ? "disabled" : ""} style="max-width:260px;margin:0 auto">
+          ${parsing ? "Reading…" : `Read ${photoImages.length} page${photoImages.length > 1 ? "s" : ""}`}</button>` : ""}
       </div>
       ${err ? `<p class="err">${esc(err)}</p>` : ""}
       <p class="meta" style="text-align:center">Clear, well-lit, straight-on photos read best. Messy handwriting may need a retry.</p>`;
@@ -186,21 +197,29 @@ function recipeView() {
     ${err ? `<p class="err">${esc(err)}</p>` : ""}`;
   if (parsed) {
     html += `<div class="parsed">
-      <div class="parsed-head" style="display:flex;justify-content:space-between;align-items:center">
-        <span>${esc(parsedTitle || "Recipe")}</span>
-        <button class="btn btn-sky" id="save" style="width:auto;padding:5px 12px;font-size:12px">Save recipe</button>
-      </div>`;
+      <div class="parsed-head" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <input id="pTitle" value="${esc(parsedTitle || "")}" placeholder="Recipe name"
+          style="flex:1;border:1px solid #d6d3d1;border-radius:8px;padding:6px 8px;font-size:13px;font-weight:600" />
+        <button class="btn btn-sky" id="save" style="width:auto;padding:5px 12px;font-size:12px">Save</button>
+      </div>
+      <div class="meta" style="padding:8px 12px 0;font-weight:600">INGREDIENTS — edit, remove, or add below</div>`;
     parsed.forEach((p, i) => {
       const have = pantry.find(x => norm(x.name) === norm(p.name));
-      html += `<div class="pitem">
-        <input type="checkbox" data-use="${i}" ${p.use ? "checked" : ""} style="accent-color:#059669;width:16px;height:16px" />
-        <span style="flex:1">
-          <span class="name">${esc(p.name)}</span><br>
-          <span class="meta">uses ${esc(p.use_qty)} ${esc(p.use_unit)} · buy ${esc(p.pkg_label)}</span>
-        </span>
-        ${have ? `<span class="stock">have ${showBase(have.base, have.base_unit)}</span>` : ""}
-      </div>`;
+      html += `<div class="pitem" style="gap:6px;align-items:center">
+        <input type="checkbox" data-use="${i}" ${p.use ? "checked" : ""} style="accent-color:#059669;width:16px;height:16px;flex:none" />
+        <input data-ename="${i}" value="${esc(p.name || "")}" placeholder="ingredient"
+          style="flex:2;min-width:80px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 7px;font-size:13px" />
+        <input data-eqty="${i}" value="${esc(p.use_qty ?? "")}" inputmode="decimal" placeholder="qty"
+          style="width:46px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 4px;font-size:13px;text-align:center" />
+        <input data-eunit="${i}" value="${esc(p.use_unit || "")}" placeholder="unit"
+          style="width:60px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 4px;font-size:13px" />
+        <button class="ic del" data-edel="${i}" title="remove" style="flex:none">🗑</button>
+      </div>
+      ${have ? `<div class="meta" style="padding:0 12px 4px 40px;color:#059669">have ${showBase(have.base, have.base_unit)} in stock</div>` : ""}`;
     });
+    html += `<div style="padding:8px 12px">
+      <button class="btn" id="addIng" style="width:auto;padding:6px 12px;font-size:13px;background:#e7e5e4;color:#44403c">+ Add ingredient</button>
+    </div>`;
     if (parsedSteps.length)
       html += `<div style="padding:10px 12px;border-top:1px solid #f5f5f4">
         <div class="meta" style="font-weight:600;margin-bottom:6px">STEPS</div>
@@ -212,6 +231,7 @@ function recipeView() {
         <button class="btn btn-sky" id="toListAll">Add all → List</button>
       </div>
       <button class="btn btn-dark" id="cook" style="margin-top:8px">Cooked it → subtract stock</button>
+      ${parsedDirty ? `<p class="meta" style="margin-top:8px;text-align:center">Edited — amounts will be re-sized for shopping when you Save or add to list.</p>` : ""}
     </div></div>`;
   }
   return html;
@@ -387,8 +407,12 @@ function wire() {
   const pp = $("#photoPick"); const pi = $("#photoInput");
   if (pp && pi) {
     pp.onclick = () => pi.click();
-    pi.onchange = () => { if (pi.files && pi.files[0]) handlePhoto(pi.files[0]); };
+    pi.onchange = () => { if (pi.files && pi.files[0]) addPhotoPage(pi.files[0]); pi.value = ""; };
   }
+  const prd = $("#photoRead"); if (prd) prd.onclick = readPhotoPages;
+  document.querySelectorAll("[data-photodel]").forEach(b => b.onclick = () => {
+    photoImages.splice(+b.dataset.photodel, 1); render();
+  });
 
   const raw = $("#raw"); if (raw) raw.oninput = e => rawRecipe = e.target.value;
   const url = $("#url");
@@ -403,9 +427,20 @@ function wire() {
   const ex = $("#extract"); if (ex) ex.onclick = () => extract({ recipe: rawRecipe });
   const fu = $("#fromUrl"); if (fu) fu.onclick = () => extract({ url: recipeUrl });
   document.querySelectorAll("[data-use]").forEach(c => c.onchange = () => parsed[+c.dataset.use].use = c.checked);
-  const tl = $("#toList"); if (tl) tl.onclick = () => addToList(parsed.filter(p => p.use));
-  const tla = $("#toListAll"); if (tla) tla.onclick = () => addToList(parsed.filter(p => p.use), true);
-  const ck = $("#cook"); if (ck) ck.onclick = () => cook(parsed.filter(p => p.use));
+  // inline ingredient edits — mark dirty so amounts get re-computed on save/add
+  document.querySelectorAll("[data-ename]").forEach(el => el.oninput = () => { parsed[+el.dataset.ename].name = el.value; parsedDirty = true; });
+  document.querySelectorAll("[data-eqty]").forEach(el => el.oninput = () => { parsed[+el.dataset.eqty].use_qty = el.value; parsedDirty = true; });
+  document.querySelectorAll("[data-eunit]").forEach(el => el.oninput = () => { parsed[+el.dataset.eunit].use_unit = el.value; parsedDirty = true; });
+  document.querySelectorAll("[data-edel]").forEach(b => b.onclick = () => { parsed.splice(+b.dataset.edel, 1); parsedDirty = true; render(); });
+  const ai = $("#addIng"); if (ai) ai.onclick = () => {
+    parsed.push({ name: "", use_qty: "", use_unit: "", base_unit: "count", use_base: 0, pkg_label: "each", pkg_base: 1, use: true });
+    parsedDirty = true; render();
+    const inputs = document.querySelectorAll("[data-ename]"); if (inputs.length) inputs[inputs.length - 1].focus();
+  };
+  const pt = $("#pTitle"); if (pt) pt.oninput = () => { parsedTitle = pt.value; };
+  const tl = $("#toList"); if (tl) tl.onclick = () => addToListEdited(false);
+  const tla = $("#toListAll"); if (tla) tla.onclick = () => addToListEdited(true);
+  const ck = $("#cook"); if (ck) ck.onclick = () => cookEdited();
   const sv = $("#save"); if (sv) sv.onclick = saveRecipe;
 
   // saved tab
@@ -481,11 +516,45 @@ async function extract({ recipe, url }) {
     parsedTitle = r.title || "";
     parsedSteps = r.steps || [];
     parsedSource = r.source_url || "";
+    parsedDirty = false;
   } catch (e) {
     err = "Couldn't read that recipe. Check the link, or paste the text instead.";
   } finally {
     parsing = false; render();
   }
+}
+
+// If the ingredient list was hand-edited, re-run the parser on the edited names
+// so package/base amounts (used for shopping + stock) match what you typed.
+async function reparseIfDirty() {
+  if (!parsedDirty) return true;
+  const usable = parsed.filter(p => (p.name || "").trim());
+  if (!usable.length) { err = "Add at least one ingredient."; render(); return false; }
+  const lines = usable.map(p => `${p.use_qty || ""} ${p.use_unit || ""} ${p.name}`.trim()).join("\n");
+  parsing = true; err = ""; render();
+  try {
+    const r = await api("/parse", J({ m: "POST", b: { recipe: `TITLE: ${parsedTitle || "Recipe"}\n\nINGREDIENTS:\n${lines}` } }));
+    if (r.error) throw new Error(r.error);
+    if (!r.items || !r.items.length) throw new Error("Couldn't re-read the edited ingredients.");
+    // keep each row's use flag by position where possible
+    parsed = r.items.map((x, i) => ({ ...x, use: usable[i] ? usable[i].use !== false : true }));
+    parsedDirty = false;
+    return true;
+  } catch (e) {
+    err = e && e.message ? e.message : "Couldn't process the edits.";
+    return false;
+  } finally {
+    parsing = false;
+  }
+}
+
+async function addToListEdited(all) {
+  if (!(await reparseIfDirty())) { render(); return; }
+  await addToList(parsed.filter(p => p.use), all);
+}
+async function cookEdited() {
+  if (!(await reparseIfDirty())) { render(); return; }
+  await cook(parsed.filter(p => p.use));
 }
 
 // Downscale an image file and return { dataUrl, base64, mediaType }.
@@ -511,23 +580,34 @@ function readAndShrinkImage(file, maxDim = 1400) {
   });
 }
 
-async function handlePhoto(file) {
-  err = ""; parsing = true; photoPreview = ""; render();
+async function addPhotoPage(file) {
+  err = ""; render();
   try {
-    const { dataUrl, base64, mediaType } = await readAndShrinkImage(file);
-    photoPreview = dataUrl; render();
-    const r = await api("/parse", J({ m: "POST", b: { image: base64, image_type: mediaType } }));
+    const im = await readAndShrinkImage(file);
+    photoImages.push(im);
+    render();
+  } catch (e) {
+    err = "Couldn't load that image."; render();
+  }
+}
+
+async function readPhotoPages() {
+  if (!photoImages.length) return;
+  err = ""; parsing = true; render();
+  try {
+    const images = photoImages.map(im => ({ data: im.base64, media_type: im.mediaType }));
+    const r = await api("/parse", J({ m: "POST", b: { images } }));
     if (r.error) throw new Error(r.error);
-    if (!r.items || !r.items.length) throw new Error("No ingredients found in that photo. Try a clearer picture, or type it in.");
-    // route into the same review view the import flow uses
+    if (!r.items || !r.items.length) throw new Error("No ingredients found in those photos. Try clearer pictures, or type it in.");
     parsed = r.items.map(x => ({ ...x, use: true }));
     parsedTitle = r.title || "";
     parsedSteps = r.steps || [];
     parsedSource = "";
-    recipeMode = "import"; // show the parsed card with save / add buttons
+    parsedDirty = false;
+    photoImages = [];
+    recipeMode = "import"; // show the editable parsed card
   } catch (e) {
-    err = e && e.message ? e.message : "Couldn't read that photo. Try a clearer picture.";
-    photoPreview = "";
+    err = e && e.message ? e.message : "Couldn't read those photos. Try clearer pictures.";
   } finally {
     parsing = false; render();
   }
@@ -563,10 +643,11 @@ async function saveManualRecipe() {
 }
 
 async function saveRecipe() {
+  if (!(await reparseIfDirty())) { render(); return; }
   await api("/recipes", J({ m: "POST", b: {
     title: parsedTitle || "Untitled recipe",
     source_url: parsedSource,
-    ingredients: parsed.map(({ use, ...rest }) => rest),
+    ingredients: parsed.filter(p => p.use !== false).map(({ use, ...rest }) => rest),
     steps: parsedSteps,
   }}));
   await refresh();
