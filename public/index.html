@@ -340,6 +340,20 @@ async function loadMeals() {
   render();
 }
 
+// Older recipes saved before time-estimation have prep_min/cook_min of 0.
+// When one is opened, estimate its times once in the background and show them.
+async function ensureRecipeTimes() {
+  const r = viewing;
+  if (!r || !r.id) return;
+  if ((r.prep_min || 0) > 0 || (r.cook_min || 0) > 0) return; // already has times
+  if (!(r.steps && r.steps.length) && !(r.ingredients && r.ingredients.length)) return;
+  const est = await api(`/recipes/${r.id}/estimate-time`, { method: "POST" });
+  if (est && !est.error && viewing && viewing.id === r.id) {
+    viewing.prep_min = est.prep_min; viewing.cook_min = est.cook_min;
+    render();
+  }
+}
+
 async function savePlanMeal() {
   if (!planAddRecipe) { err = "Pick a recipe."; render(); return; }
   await api("/meals", J({ m: "POST", b: { date: planAddDay, meal_time: planAddTime, recipe_id: +planAddRecipe } }));
@@ -352,6 +366,7 @@ document.querySelectorAll(".tab").forEach(b =>
     tab = b.dataset.tab; viewing = null; err = "";
     document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t === b));
     if (tab === "plan") { planAddDay = null; loadMeals(); }
+    else if (tab === "saved") { refresh(); }
     else render();
   });
 
@@ -469,6 +484,12 @@ function recipeView() {
       html += `<div style="padding:10px 12px;border-top:1px solid #f5f5f4">
         <div class="meta" style="font-weight:600;margin-bottom:6px">STEPS</div>
         <ol style="padding-left:18px;font-size:14px;line-height:1.5">${parsedSteps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>
+      </div>`;
+    if (parsedPrep || parsedCook)
+      html += `<div style="display:flex;gap:16px;padding:8px 12px;border-top:1px solid #f5f5f4">
+        ${parsedPrep ? `<span class="meta">🔪 prep ${minutesToText(parsedPrep)}</span>` : ""}
+        ${parsedCook ? `<span class="meta">🔥 cook ${minutesToText(parsedCook)}</span>` : ""}
+        <span class="meta" style="font-weight:600">total ${minutesToText((parsedPrep || 0) + (parsedCook || 0))}</span>
       </div>`;
     html += nutritionBlock(parsedNutrition);
     html += `<div style="padding:12px;background:#fafaf9;border-top:1px solid #f5f5f4">
@@ -889,12 +910,14 @@ function wire() {
     tab = "saved";
     document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "saved"));
     render();
+    ensureRecipeTimes();
   });
 
   // saved tab
   document.querySelectorAll("[data-sort]").forEach(b => b.onclick = () => { savedSort = b.dataset.sort; render(); });
   document.querySelectorAll("[data-open-recipe]").forEach(b => b.onclick = async () => {
     viewing = await api(`/recipes/${b.dataset.openRecipe}`); servings = 1; cookStep = -1; showPhotos = false; shareOpen = false; shareMsg = ""; err = ""; render();
+    ensureRecipeTimes();
   });
   const so = $("#shareOpenBtn"); if (so) so.onclick = () => { shareOpen = true; shareMsg = ""; render(); };
   const sg = $("#shareGo"); if (sg) sg.onclick = shareRecipe;

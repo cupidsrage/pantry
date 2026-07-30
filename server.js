@@ -890,6 +890,33 @@ app.delete("/api/recipes/:id", requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// Estimate prep/cook time for an existing recipe that predates the feature.
+const TIME_PROMPT = (title, ings, steps) => `Estimate hands-on PREP minutes and COOK minutes for this recipe. Return ONLY MINIFIED JSON: {"prep":minutes,"cook":minutes}. cook is 0 for no-cook recipes. Use printed times if the steps mention them, else estimate from the ingredients and method.
+TITLE: ${title}
+INGREDIENTS: ${ings}
+STEPS: ${steps}`;
+
+app.post("/api/recipes/:id/estimate-time", requireAuth, async (req, res) => {
+  const row = db.prepare("SELECT * FROM recipes WHERE id=? AND user_id=?").get(req.params.id, req.userId);
+  if (!row) return res.status(404).json({ error: "not found" });
+  if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: "no API key" });
+  const ings = JSON.parse(row.ingredients || "[]").map((i) => i.name).join(", ");
+  const steps = JSON.parse(row.steps || "[]").join(" ");
+  let raw;
+  try {
+    raw = (await callClaude(TIME_PROMPT(row.title, ings, steps), 100)).replace(/```json|```/g, "").trim();
+  } catch (e) {
+    return res.json({ prep_min: 0, cook_min: 0 }); // best-effort
+  }
+  let obj;
+  try { obj = JSON.parse(raw); }
+  catch { const f = raw.indexOf("{"), l = raw.lastIndexOf("}"); try { obj = JSON.parse(raw.slice(f, l + 1)); } catch { return res.json({ prep_min: 0, cook_min: 0 }); } }
+  const prep = Math.max(0, Math.round(Number(obj.prep) || 0));
+  const cook = Math.max(0, Math.round(Number(obj.cook) || 0));
+  db.prepare("UPDATE recipes SET prep_min=?, cook_min=? WHERE id=? AND user_id=?").run(prep, cook, req.params.id, req.userId);
+  res.json({ prep_min: prep, cook_min: cook });
+});
+
 // Share a saved recipe with another account: copies it into their recipes.
 app.post("/api/recipes/:id/share", requireAuth, (req, res) => {
   const to = (req.body.username || "").trim().toLowerCase();
@@ -957,6 +984,6 @@ app.delete("/api/meals/:id", requireAuth, (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30k" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30m" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30k]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30m]`));
