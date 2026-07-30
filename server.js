@@ -189,11 +189,20 @@ const TEXT_MODEL = "claude-haiku-4-5-20251001";
 const VISION_MODEL = "claude-sonnet-5";
 const PRICING = {
   "claude-haiku-4-5-20251001": { in: 1.0, out: 5.0 },
-  "claude-sonnet-4-6": { in: 3.0, out: 15.0 },
   "claude-sonnet-5": { in: 2.0, out: 10.0 }, // intro pricing through Aug 31, 2026 ($3/$15 after)
 };
 let sessionCost = 0;
 let sessionCalls = 0;
+
+// Build the right content block for an uploaded file: PDFs go in a `document`
+// block, everything else is treated as an image. Both are read by the vision model.
+function mediaBlock(data, mediaType) {
+  const media = mediaType || "image/jpeg";
+  if (media === "application/pdf") {
+    return { type: "document", source: { type: "base64", media_type: "application/pdf", data } };
+  }
+  return { type: "image", source: { type: "base64", media_type: media, data } };
+}
 
 async function callClaude(prompt, maxTokens = 1500, model = TEXT_MODEL) {
   // prompt is either a string (text only) or an array of content blocks (for images);
@@ -450,7 +459,7 @@ app.post("/api/pantry-photo", async (req, res) => {
   let raw;
   try {
     raw = (await callClaude([
-      { type: "image", source: { type: "base64", media_type: image_type || "image/jpeg", data: image } },
+      mediaBlock(image, image_type),
       { type: "text", text: PANTRY_PHOTO_PROMPT },
     ], 500, VISION_MODEL)).replace(/```json|```/g, "").trim();
   } catch (e) {
@@ -494,7 +503,7 @@ app.post("/api/receipt", async (req, res) => {
   let raw;
   try {
     raw = (await callClaude([
-      { type: "image", source: { type: "base64", media_type: image_type || "image/jpeg", data: image } },
+      mediaBlock(image, image_type),
       { type: "text", text: RECEIPT_PROMPT },
     ], 2000, VISION_MODEL)).replace(/```json|```/g, "").trim();
   } catch (e) {
@@ -528,17 +537,17 @@ app.post("/api/parse", async (req, res) => {
     return res.status(500).json({ error: "ANTHROPIC_API_KEY not set on the server" });
 
   try {
-    // Photo(s) of a recipe card: send to the vision model to read.
-    // Accept either a single `image` or an array `images` (multi-page).
+    // Photo(s) or PDF of a recipe: send to the vision model to read.
+    // Accept a single `image`, an array `images` (multi-page), or a PDF as `image`.
     const imgs = Array.isArray(images) && images.length
       ? images.map((im) => ({ data: im.data, media: im.media_type || "image/jpeg" }))
       : image ? [{ data: image, media: image_type || "image/jpeg" }] : [];
     if (imgs.length) {
-      const blocks = imgs.map((im) => ({
-        type: "image",
-        source: { type: "base64", media_type: im.media, data: im.data },
-      }));
-      const note = imgs.length > 1
+      const blocks = imgs.map((im) => mediaBlock(im.data, im.media));
+      const isPdf = imgs.length === 1 && imgs[0].media === "application/pdf";
+      const note = isPdf
+        ? "(the recipe is in the attached PDF — read it and extract the recipe)"
+        : imgs.length > 1
         ? `(the recipe spans the ${imgs.length} attached images/pages — read them all in order and combine into ONE recipe)`
         : "(the recipe is in the attached image — read the handwriting/text and extract it)";
       let raw;
@@ -658,6 +667,6 @@ app.delete("/api/recipes/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29x" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-29y" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29x]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-29y]`));

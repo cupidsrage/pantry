@@ -169,12 +169,12 @@ function recipeView() {
       </div>`).join("");
     html += `
       <div style="border:2px dashed #d6d3d1;border-radius:14px;padding:22px 16px;text-align:center;margin-bottom:12px">
-        <p class="meta" style="margin-bottom:14px">Photograph a recipe card — handwritten or printed. Add more than one for a multi-page recipe.</p>
-        <input id="photoInput" type="file" accept="image/*" style="display:none" />
+        <p class="meta" style="margin-bottom:14px">Photograph a recipe card — handwritten or printed — or pick a PDF. Add more than one photo for a multi-page recipe.</p>
+        <input id="photoInput" type="file" accept="image/*,application/pdf" style="display:none" />
         ${thumbs ? `<div style="margin-bottom:12px">${thumbs}</div>` : ""}
         <button class="btn" id="photoPick" ${parsing ? "disabled" : ""}
           style="max-width:260px;margin:0 auto 8px;background:#e7e5e4;color:#44403c">
-          ${photoImages.length ? "+ Add another page" : "📷 Choose / take photo"}</button>
+          ${photoImages.length ? "+ Add another page" : "📷 Photo or PDF"}</button>
         ${photoImages.length ? `<button class="btn btn-green" id="photoRead" ${parsing ? "disabled" : ""} style="max-width:260px;margin:0 auto">
           ${parsing ? "Reading…" : `Read ${photoImages.length} page${photoImages.length > 1 ? "s" : ""}`}</button>` : ""}
       </div>
@@ -431,8 +431,8 @@ function pantryView() {
     </select>
     <button class="btn btn-dark" id="padd" style="width:auto;padding:0 14px">+</button>
   </div>
-  <input id="pantryPhotoInput" type="file" accept="image/*" style="display:none" />
-  <input id="receiptInput" type="file" accept="image/*" style="display:none" />
+  <input id="pantryPhotoInput" type="file" accept="image/*,application/pdf" style="display:none" />
+  <input id="receiptInput" type="file" accept="image/*,application/pdf" style="display:none" />
   <div style="display:flex;gap:8px;margin-bottom:12px">
     <button class="btn" id="pantryPhotoBtn" ${pantryPhotoBusy || receiptBusy ? "disabled" : ""}
       style="background:#e7e5e4;color:#44403c;font-size:14px;flex:1">
@@ -700,8 +700,48 @@ function readAndShrinkImage(file, maxDim = 1400) {
   });
 }
 
+// Read a PDF (or any file) straight to base64, no canvas.
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve({ base64: String(r.result).split(",")[1], mediaType: file.type || "application/pdf", dataUrl: r.result });
+    r.onerror = () => reject(new Error("read failed"));
+    r.readAsDataURL(file);
+  });
+}
+
+// Images get downscaled; PDFs pass through untouched.
+async function readUpload(file, maxDim = 1400) {
+  if (file.type === "application/pdf") return fileToBase64(file);
+  return readAndShrinkImage(file, maxDim);
+}
+
 async function addPhotoPage(file) {
-  err = ""; render();
+  err = "";
+  // A PDF is a whole recipe in one file — parse it directly rather than adding
+  // it to the multi-page photo strip.
+  if (file.type === "application/pdf") {
+    parsing = true; render();
+    try {
+      const { base64, mediaType } = await fileToBase64(file);
+      const r = await api("/parse", J({ m: "POST", b: { image: base64, image_type: mediaType } }));
+      if (r.error) throw new Error(r.error);
+      if (!r.items || !r.items.length) throw new Error("No ingredients found in that PDF. Try a clearer file, or type it in.");
+      parsed = r.items.map(x => ({ ...x, use: true }));
+      parsedTitle = r.title || "";
+      parsedSteps = r.steps || [];
+      parsedSource = "";
+      parsedNutrition = r.nutrition || null;
+      parsedDirty = false;
+      photoImages = [];
+      recipeMode = "import";
+    } catch (e) {
+      err = e && e.message ? e.message : "Couldn't read that PDF.";
+    } finally {
+      parsing = false; render();
+    }
+    return;
+  }
   try {
     const im = await readAndShrinkImage(file);
     photoImages.push(im);
@@ -848,7 +888,7 @@ async function addPantry() {
 async function pantryFromPhoto(file) {
   err = ""; pantryPhotoBusy = true; pantryPending = null; render();
   try {
-    const { base64, mediaType } = await readAndShrinkImage(file);
+    const { base64, mediaType } = await readUpload(file);
     const r = await api("/pantry-photo", J({ m: "POST", b: { image: base64, image_type: mediaType } }));
     if (r.error) throw new Error(r.error);
     pantryPending = { name: r.name, base: r.base, base_unit: r.base_unit, pkg_label: r.pkg_label, pkg_base: r.pkg_base };
@@ -877,7 +917,7 @@ async function confirmPantryPhoto() {
 async function receiptFromPhoto(file) {
   err = ""; receiptBusy = true; receiptItems = null; render();
   try {
-    const { base64, mediaType } = await readAndShrinkImage(file, 1600); // receipts are text-dense; keep more detail
+    const { base64, mediaType } = await readUpload(file, 1600); // receipts are text-dense; keep more detail
     const r = await api("/receipt", J({ m: "POST", b: { image: base64, image_type: mediaType } }));
     if (r.error) throw new Error(r.error);
     if (!r.items || !r.items.length) throw new Error("No grocery items found on that receipt.");
