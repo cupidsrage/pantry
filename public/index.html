@@ -307,6 +307,7 @@ function planView() {
 let tab = "recipe", pantry = [], list = [], parsed = null, rawRecipe = "", parsing = false, err = "";
 let recipeUrl = "", parsedTitle = "", parsedSteps = [], parsedSource = "", parsedNutrition = null, parsedPhotos = [], parsedPrep = 0, parsedCook = 0;
 let saved = [], viewing = null, servings = 1, cookStep = -1;
+let cookIngOpen = false;      // cook mode: full ingredient list expanded
 let shopping = false;
 let recipeMode = "import";  // "import" (link/paste), "manual", or "photo"
 let manualName = "", manualIngredients = "", manualDirections = "";
@@ -694,6 +695,67 @@ function recipeDetailView() {
     </div>`;
 }
 
+// Words that say how an ingredient is prepped rather than what it is — skipped
+// when matching an ingredient name against the words of a step.
+const ING_STOPWORDS = new Set([
+  "fresh", "dried", "ground", "large", "small", "medium", "chopped", "minced", "diced", "sliced",
+  "boneless", "skinless", "extra", "virgin", "unsalted", "salted", "all", "purpose", "whole",
+  "low", "fat", "free", "raw", "cooked", "frozen", "canned", "organic", "and", "the", "plus",
+  "optional", "for", "garnish", "room", "temperature", "finely", "coarsely", "thinly", "roughly",
+  "shredded", "grated", "peeled", "softened", "melted", "divided", "packed", "granulated", "taste",
+]);
+
+// Rough singular/plural forms so "tomatoes" in a step matches a "tomato" ingredient.
+function wordForms(w) {
+  const out = new Set([w]);
+  if (w.endsWith("ies")) out.add(w.slice(0, -3) + "y");
+  else if (w.endsWith("es")) { out.add(w.slice(0, -2)); out.add(w.slice(0, -1)); }
+  else if (w.endsWith("s")) out.add(w.slice(0, -1));
+  else {
+    out.add(w + "s"); out.add(w + "es");
+    if (w.endsWith("y")) out.add(w.slice(0, -1) + "ies");
+  }
+  return [...out];
+}
+const wordsOf = s => new Set(String(s).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(" "));
+
+// True when a step's text mentions this ingredient by any meaningful word of its name.
+function ingInStep(name, stepWords) {
+  return [...wordsOf(name)]
+    .filter(w => w.length >= 3 && !ING_STOPWORDS.has(w))
+    .some(w => wordForms(w).some(f => stepWords.has(f)));
+}
+
+// Measurements shown alongside the current step so you never have to leave cook
+// mode to check an amount: what this step uses up top, the rest behind a toggle.
+function cookIngredientsPanel(r) {
+  const ings = r.ingredients || [];
+  if (!ings.length) return "";
+  const stepWords = wordsOf(r.steps[cookStep] || "");
+  const used = ings.filter(i => ingInStep(i.name, stepWords));
+  const rest = ings.filter(i => !used.includes(i));
+  const line = (i, strong) => {
+    const amt = `${niceQty(i.use_qty * servings)} ${i.use_unit || ""}`.trim();
+    return `<div style="display:flex;gap:10px;padding:3px 0;font-size:15px;${strong ? "font-weight:600;color:#1c1917" : "color:#57534e"}">
+      <span style="flex:none;min-width:80px;text-align:right;color:#0284c7">${esc(amt)}</span>
+      <span style="flex:1">${esc(i.name)}</span>
+    </div>`;
+  };
+  return `
+    <div style="margin-top:14px;background:#fff;border:1px solid #e7e5e4;border-radius:16px;padding:12px 14px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+        <span class="meta" style="font-weight:600">${used.length ? "FOR THIS STEP" : "INGREDIENTS"}${servings !== 1 ? ` · ×${niceQty(servings)} servings` : ""}</span>
+        <button class="ic link" id="toggleCookIng" style="font-size:12px;border:0;background:none;cursor:pointer;color:#0284c7;width:auto">
+          ${cookIngOpen ? "hide full list ▲" : `full list (${ings.length}) ▼`}
+        </button>
+      </div>
+      ${used.length ? `<div style="margin-top:6px">${used.map(i => line(i, true)).join("")}</div>` : ""}
+      ${cookIngOpen
+        ? `<div style="margin-top:8px;${used.length ? "padding-top:8px;border-top:1px solid #f5f5f4" : ""}">${(used.length ? rest : ings).map(i => line(i, false)).join("")}</div>`
+        : used.length ? "" : `<p class="meta" style="margin-top:6px">Nothing measured out for this step.</p>`}
+    </div>`;
+}
+
 function cookModeView() {
   const r = viewing, n = r.steps.length, i = cookStep;
   const last = i === n - 1;
@@ -709,6 +771,7 @@ function cookModeView() {
     <div style="font-size:22px;line-height:1.4;min-height:120px;padding:20px;background:#fff;border:1px solid #e7e5e4;border-radius:16px">
       ${esc(r.steps[i])}
     </div>
+    ${cookIngredientsPanel(r)}
     <div class="actions" style="margin-top:20px">
       <button class="btn btn-dark" id="prevStep" ${i === 0 ? "disabled" : ""} style="flex:1">← Back</button>
       ${last
@@ -944,6 +1007,7 @@ function wire() {
   const su = $("#servUp"); if (su) su.onclick = () => { servings = +(servings + 0.5).toFixed(1); render(); };
   const start = $("#startCook"); if (start) start.onclick = () => { cookStep = 0; render(); };
   const exit = $("#exitCook"); if (exit) exit.onclick = () => { cookStep = -1; render(); };
+  const tci = $("#toggleCookIng"); if (tci) tci.onclick = () => { cookIngOpen = !cookIngOpen; render(); };
   const prev = $("#prevStep"); if (prev) prev.onclick = () => { cookStep = Math.max(0, cookStep - 1); render(); };
   const next = $("#nextStep"); if (next) next.onclick = () => { cookStep = Math.min(viewing.steps.length - 1, cookStep + 1); render(); };
   const fin = $("#finishCook"); if (fin) fin.onclick = async () => {
