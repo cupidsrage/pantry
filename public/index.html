@@ -308,6 +308,8 @@ let tab = "recipe", pantry = [], list = [], parsed = null, rawRecipe = "", parsi
 let recipeUrl = "", parsedTitle = "", parsedSteps = [], parsedSource = "", parsedNutrition = null, parsedPhotos = [], parsedPrep = 0, parsedCook = 0;
 let saved = [], viewing = null, servings = 1, cookStep = -1;
 let cookIngOpen = false;      // cook mode: full ingredient list expanded
+let timer = null;             // running step timer, or null — see startTimer()
+let timerTick = null, alarmLoop = null, audioCtx = null;
 let shopping = false;
 let recipeMode = "import";  // "import" (link/paste), "manual", or "photo"
 let manualName = "", manualIngredients = "", manualDirections = "";
@@ -380,7 +382,8 @@ function render() {
     tab === "list" ? listView() :
     tab === "pantry" ? pantryView() :
     tab === "plan" ? planView() :
-    savedView()) + lightboxHtml();
+    savedView()) + lightboxHtml() + timerWidget();
+  document.body.style.paddingBottom = timer ? "96px" : "";   // keep the timer bar clear of content
   wire();
 }
 
@@ -695,6 +698,160 @@ function recipeDetailView() {
     </div>`;
 }
 
+// ---- step timers ------------------------------------------------------------
+// Steps like "bake for 45 minutes" get a one-tap countdown that beeps when it's
+// up. The running timer lives outside the view so it survives step changes,
+// leaving cook mode, and switching tabs.
+
+const DUR_UNITS = {
+  h: 3600, hr: 3600, hrs: 3600, hour: 3600, hours: 3600,
+  m: 60, min: 60, mins: 60, minute: 60, minutes: 60,
+  s: 1, sec: 1, secs: 1, second: 1, seconds: 1,
+};
+const DUR_FRACS = { "½": 0.5, "¼": 0.25, "¾": 0.75, "⅓": 1 / 3, "⅔": 2 / 3 };
+const DUR_RE = /(\d+(?:\.\d+)?|[½¼¾⅓⅔])\s*(?:(?:to|or|–|—|-)\s*(\d+(?:\.\d+)?))?\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/gi;
+const shortUnit = u => (DUR_UNITS[u.toLowerCase()] === 3600 ? "hr" : DUR_UNITS[u.toLowerCase()] === 60 ? "min" : "sec");
+
+// Durations mentioned in a step, e.g. "bake 45-50 minutes" -> one 45 min timer.
+// Ranges start at the low end so you check the food before it overcooks.
+function parseDurations(text) {
+  const raw = [];
+  let m;
+  DUR_RE.lastIndex = 0;
+  while ((m = DUR_RE.exec(text))) {
+    const unit = DUR_UNITS[m[3].toLowerCase()];
+    const lo = DUR_FRACS[m[1]] != null ? DUR_FRACS[m[1]] : parseFloat(m[1]);
+    const hi = m[2] ? parseFloat(m[2]) : null;
+    if (!(lo > 0)) continue;
+    raw.push({
+      start: m.index, end: m.index + m[0].length, unit, ranged: hi != null,
+      secs: Math.round(lo * unit),
+      label: `${niceQty(lo)}${hi != null ? `–${niceQty(hi)}` : ""} ${shortUnit(m[3])}`,
+    });
+  }
+  // "1 hour 30 minutes" is one timer, not two.
+  const merged = [];
+  for (const d of raw) {
+    const prev = merged[merged.length - 1];
+    const between = prev ? text.slice(prev.end, d.start).trim().replace(/^(and|,|&)$/i, "") : null;
+    if (prev && between === "" && d.unit < prev.unit && !prev.ranged && !d.ranged) {
+      prev.secs += d.secs; prev.label += ` ${d.label}`; prev.end = d.end;
+    } else merged.push(d);
+  }
+  return merged
+    .filter(d => d.secs >= 10 && d.secs <= 12 * 3600)
+    .filter((d, i, a) => a.findIndex(x => x.secs === d.secs) === i);
+}
+
+function fmtClock(ms) {
+  const t = Math.max(0, Math.ceil(ms / 1000)), h = Math.floor(t / 3600);
+  const mm = Math.floor((t % 3600) / 60), ss = t % 60;
+  return h ? `${h}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`
+           : `${mm}:${String(ss).padStart(2, "0")}`;
+}
+
+function startTimer(secs, name) {
+  primeAudio();                       // this click is the gesture that unlocks audio
+  stopAlarm();
+  timer = { name, total: secs * 1000, leftMs: secs * 1000, endsAt: Date.now() + secs * 1000, running: true, done: false };
+  if (!timerTick) timerTick = setInterval(tickTimer, 250);
+  render();
+}
+function clearTimer() { stopAlarm(); timer = null; clearInterval(timerTick); timerTick = null; render(); }
+function toggleTimer() {
+  if (!timer || timer.done) return;
+  if (timer.running) { timer.leftMs = Math.max(0, timer.endsAt - Date.now()); timer.running = false; }
+  else { timer.endsAt = Date.now() + timer.leftMs; timer.running = true; }
+  render();
+}
+function bumpTimer(ms) {
+  if (!timer || timer.done) return;
+  timer.total += ms;
+  if (timer.running) timer.endsAt += ms; else timer.leftMs += ms;
+  render();
+}
+function tickTimer() {
+  if (!timer) { clearInterval(timerTick); timerTick = null; return; }
+  if (timer.running) {
+    timer.leftMs = Math.max(0, timer.endsAt - Date.now());
+    if (timer.leftMs === 0) { timer.running = false; timer.done = true; startAlarm(); render(); return; }
+  }
+  paintTimer();   // cheap per-second update; a full render would steal focus elsewhere
+}
+function paintTimer() {
+  if (!timer) return;
+  const left = $("#timerLeft"); if (left) left.textContent = fmtClock(timer.leftMs);
+  const fill = $("#timerFill");
+  if (fill) fill.style.width = `${Math.max(0, Math.min(100, 100 - (timer.leftMs / timer.total) * 100))}%`;
+}
+
+function primeAudio() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  } catch (e) { audioCtx = null; }
+}
+function beep() {
+  try {
+    primeAudio();
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    for (let k = 0; k < 3; k++) {                      // three short rising pips
+      const osc = audioCtx.createOscillator(), gain = audioCtx.createGain(), at = t0 + k * 0.32;
+      osc.type = "sine"; osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.0001, at);
+      gain.gain.exponentialRampToValueAtTime(0.35, at + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.26);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(at); osc.stop(at + 0.3);
+    }
+  } catch (e) { /* audio blocked — the on-screen alert and vibration still fire */ }
+  if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300]);
+}
+// Keep ringing until it's acknowledged, but give up after a couple of minutes.
+function startAlarm() {
+  beep();
+  let rings = 1;
+  clearInterval(alarmLoop);
+  alarmLoop = setInterval(() => {
+    if (!timer || !timer.done || ++rings > 24) { stopAlarm(); return; }
+    beep();
+  }, 2500);
+}
+function stopAlarm() { clearInterval(alarmLoop); alarmLoop = null; }
+
+// One button per duration found in the current step.
+function timerButtons(step) {
+  const durs = parseDurations(step);
+  if (!durs.length) return "";
+  return `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">
+    ${durs.map(d => `<button class="btn btn-sky" data-timer="${d.secs}" data-tlabel="${esc(d.label)}"
+        style="width:auto;padding:8px 14px;font-size:14px">⏲ ${esc(d.label)} timer</button>`).join("")}
+  </div>`;
+}
+
+// Fixed bar so the countdown stays visible from any view once it's running.
+function timerWidget() {
+  if (!timer) return "";
+  const pct = Math.max(0, Math.min(100, 100 - (timer.leftMs / timer.total) * 100));
+  return `<div style="position:fixed;left:0;right:0;bottom:0;z-index:900;display:flex;justify-content:center;padding:10px;pointer-events:none">
+    <div style="pointer-events:auto;width:100%;max-width:420px;background:${timer.done ? "#059669" : "#1c1917"};color:#fff;border-radius:16px;padding:12px 14px;box-shadow:0 6px 24px rgba(0,0,0,.25)">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span id="timerLeft" style="font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;min-width:74px">${fmtClock(timer.leftMs)}</span>
+        <span style="flex:1;font-size:13px;opacity:.9;line-height:1.3">${timer.done ? "⏰ Time's up!" : esc(timer.name) + (timer.running ? "" : " · paused")}</span>
+        ${timer.done
+          ? `<button class="btn" id="timerStop" style="width:auto;padding:8px 16px;background:#fff;color:#059669;font-weight:600">Stop</button>`
+          : `<button class="ic" id="timerToggle" title="${timer.running ? "pause" : "resume"}" style="color:#fff;font-size:16px;width:auto;padding:4px 8px">${timer.running ? "⏸" : "▶"}</button>
+             <button class="ic" id="timerAdd" title="add a minute" style="color:#fff;font-size:13px;width:auto;padding:4px 8px">+1m</button>
+             <button class="ic" id="timerCancel" title="cancel timer" style="color:#fff;font-size:16px;width:auto;padding:4px 8px">✕</button>`}
+      </div>
+      <div style="height:4px;background:rgba(255,255,255,.25);border-radius:2px;margin-top:10px;overflow:hidden">
+        <div id="timerFill" style="height:100%;background:#fff;width:${pct}%"></div>
+      </div>
+    </div>
+  </div>`;
+}
+
 // Words that say how an ingredient is prepped rather than what it is — skipped
 // when matching an ingredient name against the words of a step.
 const ING_STOPWORDS = new Set([
@@ -771,6 +928,7 @@ function cookModeView() {
     <div style="font-size:22px;line-height:1.4;min-height:120px;padding:20px;background:#fff;border:1px solid #e7e5e4;border-radius:16px">
       ${esc(r.steps[i])}
     </div>
+    ${timerButtons(r.steps[i])}
     ${cookIngredientsPanel(r)}
     <div class="actions" style="margin-top:20px">
       <button class="btn btn-dark" id="prevStep" ${i === 0 ? "disabled" : ""} style="flex:1">← Back</button>
@@ -1008,6 +1166,14 @@ function wire() {
   const start = $("#startCook"); if (start) start.onclick = () => { cookStep = 0; render(); };
   const exit = $("#exitCook"); if (exit) exit.onclick = () => { cookStep = -1; render(); };
   const tci = $("#toggleCookIng"); if (tci) tci.onclick = () => { cookIngOpen = !cookIngOpen; render(); };
+
+  // step timers (the widget is global, so these bind in every view)
+  document.querySelectorAll("[data-timer]").forEach(b => b.onclick = () =>
+    startTimer(+b.dataset.timer, `${b.dataset.tlabel}${cookStep >= 0 ? ` · step ${cookStep + 1}` : ""}`));
+  const tTog = $("#timerToggle"); if (tTog) tTog.onclick = toggleTimer;
+  const tAdd = $("#timerAdd"); if (tAdd) tAdd.onclick = () => bumpTimer(60000);
+  const tCan = $("#timerCancel"); if (tCan) tCan.onclick = clearTimer;
+  const tStop = $("#timerStop"); if (tStop) tStop.onclick = clearTimer;
   const prev = $("#prevStep"); if (prev) prev.onclick = () => { cookStep = Math.max(0, cookStep - 1); render(); };
   const next = $("#nextStep"); if (next) next.onclick = () => { cookStep = Math.min(viewing.steps.length - 1, cookStep + 1); render(); };
   const fin = $("#finishCook"); if (fin) fin.onclick = async () => {
