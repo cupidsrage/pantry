@@ -240,6 +240,47 @@ function thawWhenText(dt) {
   return `${DOW[dt.getDay()]} ${t}`;
 }
 
+// Searchable, sortable list of saved recipes used when adding a meal to a day.
+// Tap a row to select it; the highlighted row is what "Add to <day>" saves.
+function recipePicker() {
+  if (!saved.length)
+    return `<p class="meta" style="text-align:center;padding:6px 0">No saved recipes yet — save one on the Recipe tab first.</p>`;
+
+  const rows = recipeRows(saved, planSort, planSearch);
+  const seg = (k, label) =>
+    `<button data-plansort="${k}" style="flex:1;border:0;padding:6px 2px;border-radius:7px;font-size:11px;font-weight:500;cursor:pointer;${planSort === k ? "background:#fff;color:#1c1917;box-shadow:0 1px 2px rgba(0,0,0,.06)" : "background:none;color:#78716c"}">${label}</button>`;
+
+  const picks = rows.map(({ r, cov, soon, via }) => {
+    const on = String(r.id) === String(planAddRecipe);
+    const makeable = cov.total > 0 && cov.have === cov.total;
+    const badge = makeable
+      ? `<span style="color:#059669;font-weight:600">✓ can make</span>`
+      : `<span>${cov.have}/${cov.total} on hand</span>`;
+    return `<button data-planpick="${r.id}" style="display:block;width:100%;text-align:left;cursor:pointer;
+        border:1px solid ${on ? "#059669" : "#e7e5e4"};background:${on ? "#ecfdf5" : "#fff"};
+        border-radius:8px;padding:7px 9px;margin-bottom:4px">
+      <span style="font-size:13px;font-weight:${on ? "600" : "500"};color:#1c1917;text-transform:capitalize">${on ? "✓ " : ""}${esc(r.title)}</span><br>
+      <span class="meta" style="font-size:11px">${badge}${planSort === "expiring" ? soonTagHtml(soon) : ""}${via ? ` · has ${esc(via)}` : ""}</span>
+    </button>`;
+  }).join("");
+
+  return `
+    <div style="position:relative;display:flex;align-items:center;margin-bottom:6px">
+      <input id="planSearch" value="${esc(planSearch)}" placeholder="Search recipes or ingredients…"
+        autocapitalize="none" autocorrect="off"
+        style="width:100%;padding:8px 30px 8px 10px;border:1px solid #d6d3d1;border-radius:8px;font-size:14px" />
+      ${planSearch ? `<button id="planSearchClear" title="Clear search"
+        style="position:absolute;right:6px;border:0;background:#e7e5e4;color:#57534e;width:20px;height:20px;border-radius:50%;cursor:pointer;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center">✕</button>` : ""}
+    </div>
+    <div style="display:flex;gap:3px;background:rgba(214,211,209,.45);padding:3px;border-radius:9px;margin-bottom:6px">
+      ${seg("recent", "Recent")}${seg("az", "A–Z")}${seg("canmake", "Can make")}${seg("expiring", "Use soon")}
+    </div>
+    <div id="planPickList" style="max-height:190px;overflow-y:auto;-webkit-overflow-scrolling:touch">
+      ${picks || `<p class="meta" style="text-align:center;padding:10px 0">No recipes match “${esc(planSearch)}”.</p>`}
+    </div>
+    ${rows.length && planSearch ? `<p class="meta" style="font-size:11px;text-align:right">${rows.length} of ${saved.length}</p>` : ""}`;
+}
+
 function planView() {
   if (!planWeekStart) planWeekStart = weekStartOf(new Date());
   const ws = planWeekStart;
@@ -284,12 +325,9 @@ function planView() {
     }
 
     if (planAddDay === dY) {
-      const opts = saved.map(r => `<option value="${r.id}">${esc(r.title)}</option>`).join("");
       html += `<div style="margin-top:8px;padding:8px;background:#eff6ff;border-radius:8px">
-        <select id="planRecipeSel" style="width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:14px;margin-bottom:6px">
-          <option value="">— pick a saved recipe —</option>${opts}
-        </select>
-        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+        ${recipePicker()}
+        <div style="display:flex;gap:6px;align-items:center;margin:8px 0 6px">
           <span class="meta">eat at</span>
           <input id="planTime" type="time" value="${planAddTime}" style="padding:6px;border:1px solid #d6d3d1;border-radius:8px;font-size:14px" />
         </div>
@@ -297,6 +335,7 @@ function planView() {
           <button class="btn btn-green" id="planSave" style="flex:1">Add to ${DOW[day.getDay()]}</button>
           <button class="btn btn-dark" id="planCancel" style="width:auto;padding:0 14px">✕</button>
         </div>
+        ${err ? `<p class="err">${esc(err)}</p>` : ""}
       </div>`;
     }
     html += `</div>`;
@@ -322,6 +361,8 @@ let meals = [];               // planned meals for the visible week
 let planWeekStart = null;     // Date (local) of the Sunday starting the shown week
 let planAddDay = null;        // 'YYYY-MM-DD' of the day whose add-form is open
 let planAddTime = "18:00", planAddRecipe = "";
+let planSearch = "";           // recipe-picker search box text
+let planSort = "recent";       // picker order — same modes as the Saved tab
 let lightbox = null;          // data URL of a photo shown full-screen, or null
 let pantryPhotoBusy = false, pantryPending = null;
 let receiptBusy = false, receiptItems = null;
@@ -385,6 +426,23 @@ function render() {
     savedView()) + lightboxHtml() + timerWidget();
   document.body.style.paddingBottom = timer ? "96px" : "";   // keep the timer bar clear of content
   wire();
+}
+
+// render() replaces the whole view, which would drop the picker's caret and
+// scroll position mid-search. Capture both and put them back afterwards.
+// focusSearch stays false for taps so the phone keyboard doesn't pop open.
+function renderPicker(focusSearch) {
+  const listEl = $("#planPickList");
+  const top = listEl ? listEl.scrollTop : 0;
+  const box = $("#planSearch");
+  const caret = box ? [box.selectionStart, box.selectionEnd] : null;
+  render();
+  const listAfter = $("#planPickList"); if (listAfter) listAfter.scrollTop = top;
+  const boxAfter = $("#planSearch");
+  if (boxAfter && focusSearch) {
+    boxAfter.focus();
+    if (caret && caret[0] != null) boxAfter.setSelectionRange(caret[0], caret[1]);
+  }
 }
 
 // Full-screen image overlay. Empty string when nothing is zoomed.
@@ -538,6 +596,54 @@ function recipeSoonestExpiry(r) {
   return best; // Infinity if the recipe uses nothing that has an expiry
 }
 
+// Does a recipe match a search box? Every word typed has to turn up in the title
+// or in an ingredient name, so "chicken rice" finds a recipe with both. `via`
+// names the ingredients that carried the match, for a "has chicken" hint.
+function recipeMatch(r, query) {
+  const needle = (query || "").toLowerCase().trim();
+  if (!needle) return { hit: true, via: "" };
+  const title = (r.title || "").toLowerCase();
+  const ings = (r.ingredients || []).map(i => (i.name || "").toLowerCase());
+  const via = [];
+  for (const word of needle.split(/\s+/).filter(Boolean)) {
+    if (title.includes(word)) continue;
+    const ing = ings.find(n => n.includes(word));
+    if (!ing) return { hit: false, via: "" };
+    if (!via.includes(ing)) via.push(ing);
+  }
+  return { hit: true, via: via.join(", ") };
+}
+
+// Recipes decorated with pantry coverage and soonest-expiring stock, filtered by
+// an optional search query and ordered by `mode`. Shared by the Saved tab and
+// the Plan tab's recipe picker so both sort the same way.
+function recipeRows(recipes, mode, query) {
+  const rows = [];
+  for (const r of recipes) {
+    const m = recipeMatch(r, query);
+    if (m.hit) rows.push({ r, cov: recipeCoverage(r), soon: recipeSoonestExpiry(r), via: m.via });
+  }
+  const byTitle = (a, b) => (a.r.title || "").localeCompare(b.r.title || "");
+  if (mode === "az") {
+    rows.sort(byTitle);
+  } else if (mode === "canmake") {
+    const frac = (c) => c.total ? c.have / c.total : 0;
+    rows.sort((a, b) => (frac(b.cov) - frac(a.cov)) || byTitle(a, b));
+  } else if (mode === "expiring") {
+    // recipes using the soonest-expiring stock first; recipes using nothing perishable sink
+    rows.sort((a, b) => a.soon - b.soon);
+  } // "recent" keeps server order (newest first)
+  return rows;
+}
+
+// "uses 2d stock" / "uses expired" — only meaningful in the "Use soon" ordering.
+function soonTagHtml(soon) {
+  if (!isFinite(soon)) return "";
+  const color = soon < 0 ? "#dc2626" : soon <= 3 ? "#d97706" : "#78716c";
+  const text = soon < 0 ? "uses expired" : soon === 0 ? "uses today's" : `uses ${soon}d stock`;
+  return `<span style="font-size:11px;font-weight:600;color:${color};margin-left:6px">${text}</span>`;
+}
+
 function savedView() {
   if (viewing) return recipeDetailView();
   if (!saved.length) return `<p class="empty">No saved recipes yet. Parse one on the Recipe tab and tap “Save”.</p>`;
@@ -549,16 +655,7 @@ function savedView() {
     </div>`;
 
   // build a display list with coverage, then sort
-  let rows = saved.map(r => ({ r, cov: recipeCoverage(r), soon: recipeSoonestExpiry(r) }));
-  if (savedSort === "az") {
-    rows.sort((a, b) => (a.r.title || "").localeCompare(b.r.title || ""));
-  } else if (savedSort === "canmake") {
-    const frac = (c) => c.total ? c.have / c.total : 0;
-    rows.sort((a, b) => (frac(b.cov) - frac(a.cov)) || (a.r.title || "").localeCompare(b.r.title || ""));
-  } else if (savedSort === "expiring") {
-    // recipes using the soonest-expiring stock first; recipes using nothing perishable sink
-    rows.sort((a, b) => a.soon - b.soon);
-  } // "recent" keeps server order (newest first)
+  const rows = recipeRows(saved, savedSort, "");
 
   html += rows.map(({ r, cov, soon }) => {
     const makeable = cov.total > 0 && cov.have === cov.total;
@@ -566,9 +663,7 @@ function savedView() {
       ? `<span style="font-size:11px;font-weight:600;color:#059669;background:#ecfdf5;padding:2px 8px;border-radius:10px">✓ can make</span>`
       : `<span class="meta">${cov.have}/${cov.total} on hand</span>`;
     // in "Use soon" mode, show which uses aging stock
-    const soonTag = (savedSort === "expiring" && isFinite(soon))
-      ? `<span style="font-size:11px;font-weight:600;color:${soon < 0 ? "#dc2626" : soon <= 3 ? "#d97706" : "#78716c"};margin-left:6px">${soon < 0 ? "uses expired" : soon === 0 ? "uses today's" : `uses ${soon}d stock`}</span>`
-      : "";
+    const soonTag = savedSort === "expiring" ? soonTagHtml(soon) : "";
     return `<div class="row">
       <span style="flex:1" data-open-recipe="${r.id}" role="button">
         <span class="name">${esc(r.title)}</span><br>
@@ -1121,8 +1216,24 @@ function wire() {
   // plan tab
   const plPrev = $("#planPrev"); if (plPrev) plPrev.onclick = () => { planWeekStart = addDays(planWeekStart, -7); planAddDay = null; loadMeals(); };
   const plNext = $("#planNext"); if (plNext) plNext.onclick = () => { planWeekStart = addDays(planWeekStart, 7); planAddDay = null; loadMeals(); };
-  document.querySelectorAll("[data-planadd]").forEach(b => b.onclick = () => { planAddDay = b.dataset.planadd; planAddRecipe = ""; render(); });
-  const prs = $("#planRecipeSel"); if (prs) prs.onchange = () => { planAddRecipe = prs.value; };
+  document.querySelectorAll("[data-planadd]").forEach(b => b.onclick = () => {
+    planAddDay = b.dataset.planadd; planAddRecipe = ""; planSearch = ""; err = ""; render();
+  });
+  const psr = $("#planSearch");
+  if (psr) {
+    psr.oninput = () => { planSearch = psr.value; renderPicker(true); };
+    psr.onkeydown = e => {
+      if (e.key !== "Enter") return;
+      // one match left? Enter picks it, so search-then-Enter selects in two moves.
+      const rows = recipeRows(saved, planSort, planSearch);
+      if (rows.length === 1) { planAddRecipe = String(rows[0].r.id); err = ""; renderPicker(false); }
+    };
+  }
+  const psc = $("#planSearchClear"); if (psc) psc.onclick = () => { planSearch = ""; renderPicker(true); };
+  document.querySelectorAll("[data-plansort]").forEach(b => b.onclick = () => { planSort = b.dataset.plansort; render(); });
+  document.querySelectorAll("[data-planpick]").forEach(b => b.onclick = () => {
+    planAddRecipe = b.dataset.planpick; err = ""; renderPicker(false);
+  });
   const plt = $("#planTime"); if (plt) plt.oninput = () => { planAddTime = plt.value; };
   const pls = $("#planSave"); if (pls) pls.onclick = savePlanMeal;
   const plc = $("#planCancel"); if (plc) plc.onclick = () => { planAddDay = null; render(); };
