@@ -23,6 +23,48 @@ ANTHROPIC_API_KEY=sk-ant-... npm start
 # http://localhost:3000
 ```
 
+## Cook & thaw reminders (optional)
+
+The Plan tab already works out when to start cooking and when to pull something
+out of the freezer. Turn these on and they arrive as phone notifications instead
+of waiting for you to open the app.
+
+1. Generate a keypair:
+   ```
+   npm run vapid
+   ```
+2. Add the three lines it prints to the service **Variables**
+   (`VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`).
+3. Redeploy, open the **Plan** tab, and tap **Turn on** next to "Cook & thaw
+   reminders". You'll be asked to allow notifications.
+
+Reminders fire per device, so turn them on wherever you want them. Times use the
+timezone of whichever device most recently enabled them. Leave the variables
+unset and the whole feature stays hidden — nothing else changes.
+
+> Keep the keypair. Regenerating it invalidates every existing subscription, and
+> everyone has to tap **Turn on** again.
+
+## Scanning barcodes
+
+On the Pantry tab, **🏷️ Barcode** takes a photo of a product barcode and looks it
+up in [Open Food Facts](https://world.openfoodfacts.org). Browsers that support
+`BarcodeDetector` (Chrome, Android) decode the photo on the phone for free;
+everywhere else (iOS Safari) the photo goes to the server and the model reads the
+digits printed under the bars. You can also tap **type a barcode number** and
+enter it by hand.
+
+The product name comes back branded ("Great Value 2% Reduced Fat Milk"), so it
+gets rewritten to a plain name ("milk") that matches your recipe ingredients.
+
+## Grocery spending
+
+Prices are read off receipts along with the items, and you can correct any of
+them before adding. **💵 Spending** at the bottom of the Pantry tab shows monthly
+totals, your biggest-spend items, and per-item price changes — compared by unit
+price, so buying two of something doesn't read as a price hike. Items with no
+price are still added to the pantry; they just don't count toward spending.
+
 ## Install on your phone (PWA)
 
 The app is a Progressive Web App — no app store needed.

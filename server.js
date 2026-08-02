@@ -61,6 +61,37 @@ db.exec(`
     user_id INTEGER NOT NULL,
     created INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS push_subs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    endpoint TEXT NOT NULL UNIQUE,   -- the push service URL; also acts as the device's secret
+    tz_offset INTEGER NOT NULL DEFAULT 0, -- Date.getTimezoneOffset() on that device
+    created INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS push_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    tag TEXT NOT NULL DEFAULT '',
+    created INTEGER NOT NULL,
+    delivered INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS sent_reminders (
+    key TEXT PRIMARY KEY,            -- meal + kind + fire time, so a rescheduled meal re-fires
+    user_id INTEGER NOT NULL,
+    sent INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS purchases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    price REAL NOT NULL DEFAULT 0,   -- what this line cost, in dollars
+    packages REAL NOT NULL DEFAULT 1,-- how many packages that price covered
+    ym TEXT NOT NULL,                -- 'YYYY-MM' local month, so totals bucket in the user's timezone
+    bought INTEGER NOT NULL,
+    source TEXT DEFAULT 'receipt'
+  );
   CREATE TABLE IF NOT EXISTS meal_plan (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -662,9 +693,119 @@ app.post("/api/pantry-photo", requireAuth, async (req, res) => {
   });
 });
 
+// ---------- barcode scanning ----------
+// The model is told to answer with bare JSON, but occasionally wraps it in a
+// sentence. Pull the outermost {...} out and parse that; null if it's hopeless.
+function looseJson(raw) {
+  try { return JSON.parse(raw); } catch {}
+  const f = raw.indexOf("{"), l = raw.lastIndexOf("}");
+  if (f < 0 || l < f) return null;
+  try { return JSON.parse(raw.slice(f, l + 1)); } catch { return null; }
+}
+
+// Phones without the BarcodeDetector API (iOS Safari, notably) send a photo of
+// the barcode instead. The digits are printed under the bars, so the vision
+// model can just read them.
+const BARCODE_PROMPT = `This photo shows a product barcode. Read the human-readable digits printed under or beside the bars. Return ONLY MINIFIED JSON: {"code":"digits"} — digits only, no spaces or dashes, typically 8, 12 or 13 of them. If you cannot read the number confidently, return {"code":""}.`;
+
+// Open Food Facts names products by brand ("Great Value 2% Reduced Fat Milk"),
+// but pantry items are matched against recipe ingredients by name, so they have
+// to be plain and generic. Haiku does that conversion and the package-size math.
+const OFF_PROMPT = (p) => `Turn this scanned grocery product into a pantry entry. Return ONLY MINIFIED JSON, no prose.
+Shape: {"n":name,"b":base_unit,"pb":amount_in_one_package,"pl":pkg_label}
+- n: plain generic kitchen name, singular, NO brand ("Great Value 2% Reduced Fat Milk" -> "milk", "Barilla Penne Rigate" -> "penne", "Heinz Tomato Ketchup" -> "ketchup")
+- b: "g" solids | "ml" liquids | "count" whole/countable items
+- pb: how much b is in ONE package of this product (1 L carton = 1000; 500 g bag = 500; 12-ct eggs = 12). Use the stated quantity; estimate from the product type if it's missing.
+- pl: short package label ("1 L carton","500 g bag","12-ct","each")
+PRODUCT: ${p.name || "(unknown)"}
+BRAND: ${p.brand || "(none)"}
+QUANTITY: ${p.quantity || "(not stated)"}`;
+
+// Last-resort mapping when there's no API key: keep Open Food Facts' own name
+// and numeric quantity. Cruder, but it still beats typing everything in.
+function offFallback(p) {
+  const qty = Number(p.product_quantity) || 0;
+  const unit = (p.product_quantity_unit || "").toLowerCase();
+  const liquid = unit === "ml" || unit === "l";
+  return {
+    name: p.name || "",
+    base_unit: qty > 0 ? (liquid ? "ml" : "g") : "count",
+    pkg_base: qty > 0 ? (unit === "l" ? qty * 1000 : qty) : 1,
+    pkg_label: p.quantity || "each",
+  };
+}
+
+async function lookupBarcode(code) {
+  const url = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json` +
+    `?fields=product_name,product_name_en,brands,quantity,product_quantity,product_quantity_unit`;
+  const r = await fetch(url, { headers: { "User-Agent": "pantry-list/1.0 (github.com/cupidsrage/pantry)" } });
+  // 404 means "no such product"; a 5xx means the database is having a bad day,
+  // which deserves a different message, so let it throw.
+  if (r.status >= 500) throw new Error("openfoodfacts " + r.status);
+  if (!r.ok) return null;
+  const data = await r.json();
+  if (data.status !== 1 || !data.product) return null;
+  const p = data.product;
+  const name = p.product_name_en || p.product_name || "";
+  if (!name) return null;
+  return { name, brand: (p.brands || "").split(",")[0].trim(), quantity: p.quantity || "",
+    product_quantity: p.product_quantity, product_quantity_unit: p.product_quantity_unit };
+}
+
+// Body is either {code} (the browser decoded it) or {image,image_type} (it
+// couldn't, so the model reads the digits off the photo first).
+app.post("/api/barcode", requireAuth, async (req, res) => {
+  let code = String(req.body.code || "").replace(/\D/g, "");
+  const { image, image_type } = req.body;
+
+  if (!code && image) {
+    if (!process.env.ANTHROPIC_API_KEY)
+      return res.status(500).json({ error: "ANTHROPIC_API_KEY not set on the server" });
+    let raw;
+    try {
+      raw = (await callClaude([
+        mediaBlock(image, image_type),
+        { type: "text", text: BARCODE_PROMPT },
+      ], 100, VISION_MODEL)).replace(/```json|```/g, "").trim();
+    } catch {
+      return res.status(422).json({ error: "Couldn't read that barcode. Try a straight-on, well-lit photo." });
+    }
+    const obj = looseJson(raw);
+    code = String((obj && obj.code) || "").replace(/\D/g, "");
+  }
+  if (!code) return res.status(422).json({ error: "Couldn't read the barcode number. Try again, or type it in." });
+  if (code.length < 6 || code.length > 14) return res.status(422).json({ error: `“${code}” doesn't look like a barcode. Try again, or type it in.` });
+
+  let p;
+  try {
+    p = await lookupBarcode(code);
+  } catch {
+    return res.status(502).json({ error: "Couldn't reach the product database. Try again in a moment." });
+  }
+  if (!p) return res.status(404).json({ error: `No product found for ${code}. Add it by name instead.`, code });
+
+  let item = null;
+  if (process.env.ANTHROPIC_API_KEY) {
+    try {
+      const raw = (await callClaude(OFF_PROMPT(p), 200)).replace(/```json|```/g, "").trim();
+      const obj = looseJson(raw);
+      if (obj && obj.n) item = {
+        name: obj.n,
+        base_unit: ["g", "ml", "count"].includes(obj.b) ? obj.b : "count",
+        pkg_base: typeof obj.pb === "number" && obj.pb > 0 ? obj.pb : 1,
+        pkg_label: obj.pl || "each",
+      };
+    } catch { /* fall through to the raw Open Food Facts data */ }
+  }
+  if (!item) item = offFallback(p);
+
+  // One scan = one full package on the shelf.
+  res.json({ ...item, base: item.pkg_base, code, product: p.name, brand: p.brand });
+});
+
 // ---------- pantry items from a grocery receipt photo ----------
 const RECEIPT_PROMPT = `This is a grocery store receipt (a photo or PDF). Extract the purchased line items. Return ONLY MINIFIED JSON, no prose, no markdown.
-Shape: {"items":[{"n":name,"food":true_or_false,"qty":count,"b":base_unit,"amt":amount_bought,"pl":pkg_label,"pb":pkg_full}]}
+Shape: {"items":[{"n":name,"food":true_or_false,"qty":count,"b":base_unit,"amt":amount_bought,"pl":pkg_label,"pb":pkg_full,"p":price}]}
 For each PRODUCT line (skip receipt metadata entirely — see below):
 - n: expand abbreviations into a plain generic item name ("GV MLK 1GAL" -> "milk", "LG EGG 18CT" -> "egg", "BNLS CHKN BRST" -> "chicken breast"). singular.
 - food: true ONLY if this is a food or drink item that belongs in a kitchen pantry/fridge. false for everything else.
@@ -673,6 +814,7 @@ For each PRODUCT line (skip receipt metadata entirely — see below):
 - amt: total amount bought in b across all qty (two 1-gallon milks -> 7570 ml; one 18-ct eggs -> 18 count; one 5 lb flour -> 2265 g)
 - pl: package label ("gallon","18-ct","5 lb bag","each")
 - pb: amount of b in ONE package (gallon=3785; 18-ct eggs=18; dozen=12; 5 lb bag=2265)
+- p: what this line cost in dollars, as a number — the extended/total price for the line (2 @ $1.99 -> 3.98), not the unit price. Omit or use 0 if no price is printed.
 
 What is food (food:true): groceries you'd cook with or eat/drink — produce, meat, dairy, eggs, bread, pantry staples, canned/frozen food, snacks, beverages, condiments, spices, baking supplies.
 What is NOT food (food:false): household & cleaning (paper towels, dish soap, detergent, trash bags, foil, sponges), personal care (shampoo, toothpaste, soap, razors, cosmetics, medicine, vitamins), pet supplies, baby non-food (diapers, wipes), alcohol/tobacco, kitchenware, batteries, magazines, gift cards, flowers, and anything you would not store as a food ingredient.
@@ -715,9 +857,84 @@ app.post("/api/receipt", requireAuth, async (req, res) => {
       base_unit: ["g", "ml", "count"].includes(x.b) ? x.b : "count",
       pkg_label: x.pl || "each",
       pkg_base: typeof x.pb === "number" && x.pb > 0 ? x.pb : 1,
+      packages: typeof x.qty === "number" && x.qty > 0 ? x.qty : 1,
+      price: typeof x.p === "number" && x.p > 0 ? +x.p.toFixed(2) : 0,
     }));
   if (!items.length) return res.status(422).json({ error: "No items found on that receipt. Try a clearer photo." });
   res.json({ items });
+});
+
+// ---------- spending ----------
+// Record what a shopping trip cost. The client sends `ym` ('YYYY-MM') computed
+// from its own clock so months bucket in the shopper's timezone, not the server's.
+app.post("/api/purchases", requireAuth, (req, res) => {
+  const items = Array.isArray(req.body.items) ? req.body.items : [];
+  const ym = /^\d{4}-\d{2}$/.test(req.body.ym || "") ? req.body.ym : new Date().toISOString().slice(0, 7);
+  const now = Date.now();
+  const ins = db.prepare("INSERT INTO purchases (user_id,name,price,packages,ym,bought,source) VALUES (?,?,?,?,?,?,?)");
+  const saved = db.transaction(() => {
+    let n = 0;
+    for (const it of items) {
+      const price = Number(it.price);
+      if (!it.name || !Number.isFinite(price) || price <= 0) continue; // no price, nothing to track
+      ins.run(req.userId, String(it.name).trim(), price,
+        Number(it.packages) > 0 ? Number(it.packages) : 1,
+        ym, now, String(it.source || "receipt").slice(0, 20));
+      n++;
+    }
+    return n;
+  })();
+  res.json({ ok: true, saved });
+});
+
+// Monthly totals, biggest-spend items, and per-item unit-price moves. Everything
+// is scoped to the most recent `months` months that actually have purchases, so
+// a gap in shopping doesn't blank the panel out.
+app.get("/api/spend", requireAuth, (req, res) => {
+  const months = Math.min(24, Math.max(1, Number(req.query.months) || 6));
+  const rows = db.prepare("SELECT * FROM purchases WHERE user_id=? ORDER BY bought DESC, id DESC").all(req.userId);
+  if (!rows.length) return res.json({ months: [], top: [], changes: [] });
+
+  const recentYms = [...new Set(rows.map((r) => r.ym))].sort().reverse().slice(0, months);
+  const inWindow = rows.filter((r) => recentYms.includes(r.ym));
+
+  const monthTotals = recentYms.map((ym) => {
+    const rs = inWindow.filter((r) => r.ym === ym);
+    return { ym, total: +rs.reduce((s, r) => s + r.price, 0).toFixed(2), n: rs.length };
+  });
+
+  const byName = new Map();
+  for (const r of inWindow) {
+    const k = normName(r.name);
+    if (!byName.has(k)) byName.set(k, { name: r.name, total: 0, n: 0 });
+    const g = byName.get(k);
+    g.total = +(g.total + r.price).toFixed(2);
+    g.n++;
+  }
+  const top = [...byName.values()].sort((a, b) => b.total - a.total).slice(0, 8);
+
+  // Unit price = line price / packages, so buying two of something doesn't read
+  // as a price hike. Compare an item's two most recent purchases.
+  const seen = new Map();
+  for (const r of rows) { // full history, newest first
+    const k = normName(r.name);
+    if (!seen.has(k)) seen.set(k, []);
+    const list = seen.get(k);
+    if (list.length < 2) list.push(r);
+  }
+  const changes = [];
+  for (const [, list] of seen) {
+    if (list.length < 2) continue;
+    const [cur, prev] = list;
+    const unit = +(cur.price / Math.max(1, cur.packages)).toFixed(2);
+    const was = +(prev.price / Math.max(1, prev.packages)).toFixed(2);
+    if (!(unit > 0) || !(was > 0) || unit === was) continue;
+    changes.push({ name: cur.name, unit, was, ym: cur.ym, wasYm: prev.ym,
+      pct: +(((unit - was) / was) * 100).toFixed(0) });
+  }
+  changes.sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct));
+
+  res.json({ months: monthTotals, top, changes: changes.slice(0, 8) });
 });
 
 // ---------- shelf-life estimation ----------
@@ -1004,7 +1221,227 @@ app.delete("/api/meals/:id", requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-07-30n" }));
+// ---------- web push ----------
+// Reminders go out as *payload-free* pushes: the notification text lives in
+// push_queue, and the service worker fetches it when the push wakes it up. That
+// skips the RFC 8291 payload encryption entirely — all we have to sign is the
+// VAPID auth header — while the notification itself still says something useful.
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY || "";
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY || "";
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || "mailto:pantry@example.com";
+const pushEnabled = () => !!(VAPID_PUBLIC && VAPID_PRIVATE);
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-07-30n]`));
+const b64url = (buf) => Buffer.from(buf).toString("base64url");
+
+// The VAPID keys are raw EC values (65-byte uncompressed point, 32-byte scalar).
+// Node signs with a KeyObject, so rebuild the JWK form those two encode.
+function vapidPrivateKey() {
+  const pub = Buffer.from(VAPID_PUBLIC, "base64url");
+  if (pub.length !== 65 || pub[0] !== 4) throw new Error("VAPID_PUBLIC_KEY must be a 65-byte uncompressed P-256 point");
+  return crypto.createPrivateKey({
+    format: "jwk",
+    key: { kty: "EC", crv: "P-256", x: b64url(pub.subarray(1, 33)), y: b64url(pub.subarray(33, 65)), d: VAPID_PRIVATE },
+  });
+}
+
+// Signed JWT proving to the push service who is sending. `aud` is the origin of
+// the subscription endpoint, so it's per-push-service, not per-subscription.
+function vapidToken(audience) {
+  const header = b64url(JSON.stringify({ typ: "JWT", alg: "ES256" }));
+  const claims = b64url(JSON.stringify({
+    aud: audience,
+    exp: Math.floor(Date.now() / 1000) + 12 * 3600,
+    sub: VAPID_SUBJECT,
+  }));
+  const signature = crypto.sign("sha256", Buffer.from(`${header}.${claims}`),
+    { key: vapidPrivateKey(), dsaEncoding: "ieee-p1363" });
+  return `${header}.${claims}.${b64url(signature)}`;
+}
+
+// Ring one device. Returns false if the subscription is dead and should be dropped.
+async function sendPush(endpoint) {
+  const audience = new URL(endpoint).origin;
+  const r = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `vapid t=${vapidToken(audience)}, k=${VAPID_PUBLIC}`,
+      TTL: "3600",
+      "Content-Length": "0",
+    },
+  });
+  // 404/410 mean the browser threw the subscription away (uninstalled, cleared data).
+  if (r.status === 404 || r.status === 410) return false;
+  if (!r.ok) console.error(`[push] ${r.status} from ${audience}: ${(await r.text()).slice(0, 200)}`);
+  return true;
+}
+
+// Queue a notification for a user and wake their devices.
+async function notify(userId, { title, body, tag }) {
+  db.prepare("INSERT INTO push_queue (user_id,title,body,tag,created) VALUES (?,?,?,?,?)")
+    .run(userId, title, body || "", tag || "", Date.now());
+  for (const s of db.prepare("SELECT * FROM push_subs WHERE user_id=?").all(userId)) {
+    try {
+      if (!(await sendPush(s.endpoint))) db.prepare("DELETE FROM push_subs WHERE id=?").run(s.id);
+    } catch (e) {
+      console.error("[push] send failed:", e.message);
+    }
+  }
+}
+
+// Real push services are always https; plain http is allowed on loopback so the
+// whole flow can be exercised locally against a stub.
+function validPushEndpoint(endpoint) {
+  let u;
+  try { u = new URL(endpoint); } catch { return false; }
+  if (u.protocol === "https:") return true;
+  return u.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+}
+
+app.get("/api/push/key", (_, res) => res.json({ key: VAPID_PUBLIC, enabled: pushEnabled() }));
+
+app.post("/api/push/subscribe", requireAuth, (req, res) => {
+  const endpoint = String(req.body.endpoint || "");
+  if (!validPushEndpoint(endpoint)) return res.status(400).json({ error: "a valid https push endpoint is required" });
+  const tz = Number(req.body.tz_offset);
+  // Re-subscribing refreshes the timezone (and re-homes a device to this account).
+  db.prepare(`INSERT INTO push_subs (user_id,endpoint,tz_offset,created) VALUES (?,?,?,?)
+    ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id, tz_offset=excluded.tz_offset`)
+    .run(req.userId, endpoint, Number.isFinite(tz) ? tz : 0, Date.now());
+  res.json({ ok: true });
+});
+
+app.post("/api/push/unsubscribe", requireAuth, (req, res) => {
+  db.prepare("DELETE FROM push_subs WHERE endpoint=? AND user_id=?").run(String(req.body.endpoint || ""), req.userId);
+  res.json({ ok: true });
+});
+
+app.get("/api/push/status", requireAuth, (req, res) => {
+  const endpoint = String(req.query.endpoint || "");
+  const row = endpoint ? db.prepare("SELECT 1 FROM push_subs WHERE endpoint=? AND user_id=?").get(endpoint, req.userId) : null;
+  res.json({ enabled: pushEnabled(), subscribed: !!row });
+});
+
+// Called by the service worker when a push arrives. Identified by the endpoint,
+// which only that browser and the push service know — the SW has no cookie
+// guarantee of its own. Reminders older than 6 hours are dropped rather than
+// popping up long after they were useful.
+app.post("/api/push/pending", (req, res) => {
+  const endpoint = String(req.body.endpoint || "");
+  const sub = db.prepare("SELECT * FROM push_subs WHERE endpoint=?").get(endpoint);
+  if (!sub) return res.status(404).json({ error: "unknown subscription" });
+  const cutoff = Date.now() - 6 * 3600 * 1000;
+  const rows = db.prepare("SELECT * FROM push_queue WHERE user_id=? AND delivered=0 AND created>=? ORDER BY id").all(sub.user_id, cutoff);
+  db.prepare("UPDATE push_queue SET delivered=1 WHERE user_id=? AND delivered=0").run(sub.user_id);
+  res.json({ items: rows.map((r) => ({ title: r.title, body: r.body, tag: r.tag })) });
+});
+
+// ---------- reminder scheduler ----------
+// Server-side twin of the client's mealReminders(): work out when to start
+// cooking and when to pull things out of the freezer. The client renders these
+// as text in the Plan tab; here they become notifications that arrive on time.
+const REMINDER_WINDOW_MS = 30 * 60 * 1000; // don't fire something more than 30 min late
+
+function fmtClock(hhmm) {
+  const [h, m] = hhmm.split(":").map(Number);
+  const ap = h < 12 ? "AM" : "PM";
+  return `${h % 12 === 0 ? 12 : h % 12}:${String(m).padStart(2, "0")} ${ap}`;
+}
+function minutesText(min) {
+  const h = Math.floor(min / 60), m = min % 60;
+  return h ? (m ? `${h}h ${m}m` : `${h}h`) : `${m}m`;
+}
+
+// Every reminder a user's upcoming meals imply, as {key, at, title, body, tag}.
+function dueReminders(userId, tzOffset, now) {
+  const out = [];
+  const day = (ms) => new Date(ms).toISOString().slice(0, 10);
+  // Look a few days either side so timezone skew can't clip the edges.
+  const from = day(now - 86400000), to = day(now + 4 * 86400000);
+  const meals = db.prepare("SELECT * FROM meal_plan WHERE user_id=? AND date>=? AND date<=?").all(userId, from, to);
+  if (!meals.length) return out;
+
+  const pantry = db.prepare("SELECT * FROM pantry WHERE user_id=?").all(userId)
+    .map((p) => ({ ...p, shelf_life: p.shelf_life ? JSON.parse(p.shelf_life) : null }));
+
+  for (const m of meals) {
+    if (!m.meal_time || !m.recipe_id) continue;
+    const r = db.prepare("SELECT * FROM recipes WHERE id=? AND user_id=?").get(m.recipe_id, userId);
+    if (!r) continue;
+    const [y, mo, d] = m.date.split("-").map(Number);
+    const [h, mn] = m.meal_time.split(":").map(Number);
+    if ([y, mo, d, h, mn].some((n) => !Number.isFinite(n))) continue;
+    // The stored date/time is local to the shopper; tz_offset converts it to real time.
+    const eatAt = Date.UTC(y, mo - 1, d, h, mn) + tzOffset * 60000;
+
+    const total = (r.prep_min || 0) + (r.cook_min || 0);
+    const cookStart = total > 0 ? eatAt - total * 60000 : null;
+    if (cookStart) {
+      out.push({
+        key: `${m.id}:cook:${cookStart}`, at: cookStart,
+        title: `Start cooking: ${r.title}`,
+        body: `Eating at ${fmtClock(m.meal_time)} · ${minutesText(total)} to go`,
+        tag: `cook-${m.id}`,
+      });
+    }
+
+    // Thaw: ingredients we hold only as frozen stock, pulled out early enough to
+    // be ready when cooking starts.
+    const deadline = cookStart || eatAt;
+    for (const ing of JSON.parse(r.ingredients || "[]")) {
+      const batches = pantry.filter((p) => normName(p.name) === normName(ing.name));
+      if (!batches.length) continue;
+      const stateOf = (b) => b.storage || (b.shelf_life && b.shelf_life.where) || "";
+      if (!batches.every((b) => stateOf(b) === "freezer")) continue; // something unfrozen is on hand
+      const hours = batches.map((b) => b.shelf_life && b.shelf_life.thaw_hours).find((v) => typeof v === "number" && v > 0);
+      if (!hours) continue;
+      const at = deadline - hours * 3600000;
+      out.push({
+        key: `${m.id}:thaw:${ing.name}:${at}`, at,
+        title: `Take out to thaw: ${ing.name}`,
+        body: `For ${r.title} · needs about ${hours >= 24 ? Math.round(hours / 24) + " days" : hours + "h"}`,
+        tag: `thaw-${m.id}-${ing.name}`,
+      });
+    }
+  }
+  return out;
+}
+
+async function runReminderSweep() {
+  if (!pushEnabled()) return;
+  const now = Date.now();
+  // One row per subscribed user; a user's devices should agree on the timezone,
+  // so the most recently registered one wins.
+  const users = db.prepare("SELECT user_id, MAX(id) AS newest, tz_offset FROM push_subs GROUP BY user_id").all();
+  for (const u of users) {
+    let due;
+    try {
+      due = dueReminders(u.user_id, u.tz_offset, now);
+    } catch (e) {
+      console.error("[push] reminder build failed:", e.message);
+      continue;
+    }
+    for (const rem of due) {
+      if (rem.at > now || now - rem.at > REMINDER_WINDOW_MS) continue;
+      const claimed = db.prepare("INSERT OR IGNORE INTO sent_reminders (key,user_id,sent) VALUES (?,?,?)")
+        .run(rem.key, u.user_id, now).changes;
+      if (!claimed) continue; // already sent on an earlier sweep
+      await notify(u.user_id, rem);
+      console.log(`[push] sent "${rem.title}" to user ${u.user_id}`);
+    }
+  }
+  // Housekeeping: delivered notifications and old dedupe keys aren't needed.
+  db.prepare("DELETE FROM push_queue WHERE delivered=1 AND created < ?").run(now - 86400000);
+  db.prepare("DELETE FROM sent_reminders WHERE sent < ?").run(now - 30 * 86400000);
+}
+
+if (pushEnabled()) {
+  setInterval(() => { runReminderSweep().catch((e) => console.error("[push] sweep:", e.message)); }, 60000);
+  console.log("[push] reminders enabled");
+} else {
+  console.log("[push] reminders off — set VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY to turn them on (npm run vapid)");
+}
+
+const PORT = process.env.PORT || 3000;
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-08-02a" }));
+
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-08-02a]`));

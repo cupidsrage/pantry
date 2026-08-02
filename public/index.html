@@ -256,6 +256,92 @@ function mealReminders(m) {
   return out;
 }
 
+// ---------- push reminders ----------
+// The Plan tab already works out when to start cooking and when to thaw; this
+// is what makes those arrive on your phone instead of waiting to be looked at.
+let push = { enabled: false, subscribed: false, busy: false, error: "" };
+
+const pushSupported = () =>
+  "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+
+function b64ToBytes(b64) {
+  const padded = (b64 + "=".repeat((4 - b64.length % 4) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(padded), c => c.charCodeAt(0));
+}
+
+async function currentSubscription() {
+  if (!pushSupported()) return null;
+  const reg = await navigator.serviceWorker.ready;
+  return reg.pushManager.getSubscription();
+}
+
+// Reconcile browser state with the server on every start. Re-sending the
+// subscription refreshes its stored timezone offset, so reminder times stay
+// right across DST and travel.
+async function initPush() {
+  if (!pushSupported()) return;
+  try {
+    const r = await api("/push/key");
+    push.enabled = !!r.enabled;
+    if (!push.enabled) return;
+    const sub = await currentSubscription();
+    push.subscribed = !!(sub && Notification.permission === "granted");
+    if (push.subscribed)
+      await api("/push/subscribe", J({ m: "POST", b: { endpoint: sub.endpoint, tz_offset: new Date().getTimezoneOffset() } }));
+  } catch { /* reminders are optional; never block startup on them */ }
+}
+
+async function enablePush() {
+  push.busy = true; push.error = ""; render();
+  try {
+    const { key, enabled } = await api("/push/key");
+    if (!enabled) throw new Error("Reminders aren't configured on the server yet.");
+    if (await Notification.requestPermission() !== "granted")
+      throw new Error("Notifications are blocked for this site — allow them in your browser settings, then try again.");
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
+    const r = await api("/push/subscribe", J({ m: "POST", b: { endpoint: sub.endpoint, tz_offset: new Date().getTimezoneOffset() } }));
+    if (r.error) throw new Error(r.error);
+    push.subscribed = true;
+  } catch (e) {
+    push.error = e && e.message ? e.message : "Couldn't turn reminders on.";
+  } finally {
+    push.busy = false; render();
+  }
+}
+
+async function disablePush() {
+  push.busy = true; push.error = ""; render();
+  try {
+    const sub = await currentSubscription();
+    if (sub) {
+      await api("/push/unsubscribe", J({ m: "POST", b: { endpoint: sub.endpoint } }));
+      await sub.unsubscribe();
+    }
+    push.subscribed = false;
+  } catch (e) {
+    push.error = e && e.message ? e.message : "Couldn't turn reminders off.";
+  } finally {
+    push.busy = false; render();
+  }
+}
+
+// Reminder on/off row at the top of the Plan tab. Hidden entirely when the
+// server has no VAPID keys or the browser can't do push.
+function pushToggleRow() {
+  if (!push.enabled || !pushSupported()) return "";
+  const on = push.subscribed;
+  return `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;
+      border:1px solid ${on ? "#a7f3d0" : "#e7e5e4"};background:${on ? "#ecfdf5" : "#fff"};
+      border-radius:12px;padding:9px 12px;margin-bottom:12px">
+      <span style="font-size:13px;font-weight:600">🔔 Cook &amp; thaw reminders<br>
+        <span class="meta" style="font-weight:400">${on ? "on for this device" : "get a nudge when it's time to start or thaw"}</span></span>
+      <button class="btn ${on ? "btn-dark" : "btn-green"}" id="pushToggle" ${push.busy ? "disabled" : ""}
+        style="width:auto;padding:7px 14px;font-size:13px;flex:none">${push.busy ? "…" : on ? "Turn off" : "Turn on"}</button>
+    </div>
+    ${push.error ? `<p class="err">${esc(push.error)}</p>` : ""}`;
+}
+
 // "today 3:00 PM", "tomorrow 6:00 AM", "Fri 8:00 PM" — relative to now.
 function thawWhenText(dt) {
   const now = new Date();
@@ -315,7 +401,7 @@ function planView() {
   const we = addDays(ws, 6);
   const todayY = ymd(new Date());
   const label = `${MON[ws.getMonth()]} ${ws.getDate()} – ${MON[we.getMonth()]} ${we.getDate()}`;
-  let html = `
+  let html = pushToggleRow() + `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
       <button class="ic" id="planPrev" style="border:1px solid #d6d3d1;border-radius:8px;padding:4px 10px">←</button>
       <span style="font-weight:600;font-size:15px">${label}</span>
@@ -383,6 +469,7 @@ let manualName = "", manualIngredients = "", manualDirections = "";
 let parsedDirty = false;      // ingredient list was hand-edited since parse
 let photoImages = [];         // multiple pages: [{base64, mediaType, dataUrl}]
 let savedSort = "recent";     // "recent" | "az" | "canmake" | "expiring"
+let savedSearch = "";         // Saved tab search box text
 let showPhotos = false;       // detail view: original photos expanded
 let shareOpen = false, shareMsg = "", shareMsgTone = "#059669";
 let meals = [];               // planned meals for the visible week
@@ -393,8 +480,10 @@ let planSearch = "";           // recipe-picker search box text
 let planSort = "recent";       // picker order — same modes as the Saved tab
 let lightbox = null;          // data URL of a photo shown full-screen, or null
 let pantryPhotoBusy = false, pantryPending = null;
+let barcodeBusy = false, barcodeManual = null;  // manual entry box text, or null when hidden
 let pantryUse = null;         // open "remove some" editor: {name, amt, unit} or null
 let receiptBusy = false, receiptItems = null;
+let spendOpen = false, spend = null;   // grocery-spend panel: open state + last /spend payload
 
 async function refresh() {
   const [p, l, s] = await Promise.all([api("/pantry"), api("/list"), api("/recipes")]);
@@ -457,22 +546,25 @@ function render() {
   wire();
 }
 
-// render() replaces the whole view, which would drop the picker's caret and
-// scroll position mid-search. Capture both and put them back afterwards.
-// focusSearch stays false for taps so the phone keyboard doesn't pop open.
-function renderPicker(focusSearch) {
-  const listEl = $("#planPickList");
+// render() replaces the whole view, which would drop a search box's caret and
+// the result list's scroll position mid-search. Capture both and put them back
+// afterwards. focusBack stays false for taps so the phone keyboard doesn't pop open.
+function renderKeepingSearch(boxId, listId, focusBack) {
+  const listEl = listId ? $("#" + listId) : null;
   const top = listEl ? listEl.scrollTop : 0;
-  const box = $("#planSearch");
+  const box = $("#" + boxId);
   const caret = box ? [box.selectionStart, box.selectionEnd] : null;
   render();
-  const listAfter = $("#planPickList"); if (listAfter) listAfter.scrollTop = top;
-  const boxAfter = $("#planSearch");
-  if (boxAfter && focusSearch) {
+  const listAfter = listId ? $("#" + listId) : null;
+  if (listAfter) listAfter.scrollTop = top;
+  const boxAfter = $("#" + boxId);
+  if (boxAfter && focusBack) {
     boxAfter.focus();
     if (caret && caret[0] != null) boxAfter.setSelectionRange(caret[0], caret[1]);
   }
 }
+const renderPicker = (focusSearch) => renderKeepingSearch("planSearch", "planPickList", focusSearch);
+const renderSaved = (focusSearch) => renderKeepingSearch("savedSearch", null, focusSearch);
 
 // Full-screen image overlay. Empty string when nothing is zoomed.
 function lightboxHtml() {
@@ -679,14 +771,26 @@ function savedView() {
 
   const seg = (k, label) =>
     `<button data-sort="${k}" style="flex:1;border:0;padding:8px 4px;border-radius:8px;font-size:12px;font-weight:500;cursor:pointer;${savedSort === k ? "background:#fff;color:#1c1917;box-shadow:0 1px 2px rgba(0,0,0,.06)" : "background:none;color:#78716c"}">${label}</button>`;
-  let html = `<div style="display:flex;gap:4px;background:rgba(214,211,209,.4);padding:4px;border-radius:12px;margin-bottom:14px">
+  let html = `
+    <div style="position:relative;display:flex;align-items:center;margin-bottom:8px">
+      <input id="savedSearch" value="${esc(savedSearch)}" placeholder="Search recipes or ingredients…"
+        autocapitalize="none" autocorrect="off"
+        style="width:100%;padding:9px 32px 9px 12px;border:1px solid #d6d3d1;border-radius:10px;font-size:14px" />
+      ${savedSearch ? `<button id="savedSearchClear" title="Clear search"
+        style="position:absolute;right:7px;border:0;background:#e7e5e4;color:#57534e;width:22px;height:22px;border-radius:50%;cursor:pointer;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center">✕</button>` : ""}
+    </div>
+    <div style="display:flex;gap:4px;background:rgba(214,211,209,.4);padding:4px;border-radius:12px;margin-bottom:14px">
       ${seg("recent", "Recent")}${seg("az", "A–Z")}${seg("canmake", "Can make")}${seg("expiring", "Use soon")}
     </div>`;
 
   // build a display list with coverage, then sort
-  const rows = recipeRows(saved, savedSort, "");
+  const rows = recipeRows(saved, savedSort, savedSearch);
+  if (!rows.length)
+    return html + `<p class="empty">No recipes match “${esc(savedSearch)}”.</p>`;
+  if (savedSearch)
+    html += `<p class="meta" style="font-size:11px;text-align:right;margin-bottom:6px">${rows.length} of ${saved.length}</p>`;
 
-  html += rows.map(({ r, cov, soon }) => {
+  html += rows.map(({ r, cov, soon, via }) => {
     const makeable = cov.total > 0 && cov.have === cov.total;
     const badge = makeable
       ? `<span style="font-size:11px;font-weight:600;color:#059669;background:#ecfdf5;padding:2px 8px;border-radius:10px">✓ can make</span>`
@@ -696,7 +800,7 @@ function savedView() {
     return `<div class="row">
       <span style="flex:1" data-open-recipe="${r.id}" role="button">
         <span class="name">${esc(r.title)}</span><br>
-        ${badge}${soonTag}
+        ${badge}${soonTag}${via ? `<span class="meta" style="margin-left:6px">· has ${esc(via)}</span>` : ""}
       </span>
       <button class="btn btn-sky" data-open-recipe="${r.id}" style="width:auto;padding:6px 14px">Open</button>
       <button class="ic del" data-rdel="${r.id}">🗑</button>
@@ -1121,6 +1225,70 @@ function pantryUseEditor(g, u) {
   </div>`;
 }
 
+// "2026-08" -> "Aug 2026"
+function ymLabel(ym) {
+  const [y, m] = (ym || "").split("-").map(Number);
+  return MON[m - 1] ? `${MON[m - 1]} ${y}` : ym;
+}
+const money = (n) => "$" + (+n || 0).toFixed(2);
+
+// Collapsible grocery-spend summary, fed by the prices read off receipts.
+function spendPanel() {
+  if (!spendOpen)
+    return `<p style="text-align:center;margin-top:16px">
+      <button class="ic link" id="spendToggle" style="font-size:12px;border:0;background:none;cursor:pointer;color:#0284c7;width:auto">💵 Spending</button>
+    </p>`;
+
+  let body;
+  if (!spend) body = `<p class="meta" style="padding:12px;text-align:center">Loading…</p>`;
+  else if (!spend.months.length)
+    body = `<p class="meta" style="padding:12px;text-align:center">No prices yet. Add a receipt — the prices on it get tracked here.</p>`;
+  else {
+    const [thisMonth, lastMonth] = spend.months;
+    const peak = Math.max(...spend.months.map(m => m.total), 1);
+    const delta = lastMonth ? thisMonth.total - lastMonth.total : 0;
+    body = `<div style="padding:12px">
+      <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px">
+        <span style="font-size:24px;font-weight:700">${money(thisMonth.total)}</span>
+        <span class="meta">in ${ymLabel(thisMonth.ym)}</span>
+      </div>
+      ${lastMonth ? `<p class="meta" style="margin-bottom:10px;color:${delta > 0 ? "#dc2626" : "#059669"};font-weight:600">
+        ${delta > 0 ? "▲" : "▼"} ${money(Math.abs(delta))} vs ${ymLabel(lastMonth.ym)}</p>` : ""}
+      ${spend.months.map(m => `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+        <span class="meta" style="width:62px;flex:none">${ymLabel(m.ym)}</span>
+        <span style="flex:1;height:8px;background:#f5f5f4;border-radius:4px;overflow:hidden">
+          <i style="display:block;height:100%;width:${Math.round(m.total * 100 / peak)}%;background:#059669"></i></span>
+        <span class="meta" style="width:60px;text-align:right;flex:none">${money(m.total)}</span>
+      </div>`).join("")}
+    </div>`;
+
+    if (spend.changes.length)
+      body += `<div style="padding:10px 12px;border-top:1px solid #f5f5f4">
+        <div class="meta" style="font-weight:600;margin-bottom:6px">PRICE CHANGES</div>
+        ${spend.changes.map(c => `<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:3px">
+          <span style="font-size:13px;text-transform:capitalize">${esc(c.name)}</span>
+          <span class="meta" style="flex:none;color:${c.pct > 0 ? "#dc2626" : "#059669"};font-weight:600">
+            ${money(c.unit)} <span style="font-weight:400;color:#a8a29e">was ${money(c.was)}</span> ${c.pct > 0 ? "▲" : "▼"}${Math.abs(c.pct)}%</span>
+        </div>`).join("")}
+      </div>`;
+
+    if (spend.top.length)
+      body += `<div style="padding:10px 12px;border-top:1px solid #f5f5f4">
+        <div class="meta" style="font-weight:600;margin-bottom:6px">BIGGEST SPEND</div>
+        ${spend.top.map(t => `<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:3px">
+          <span style="font-size:13px;text-transform:capitalize">${esc(t.name)}</span>
+          <span class="meta" style="flex:none">${money(t.total)}${t.n > 1 ? ` · ${t.n}×` : ""}</span>
+        </div>`).join("")}
+      </div>`;
+  }
+
+  return `<div class="parsed" style="margin-top:16px">
+    <div class="parsed-head" style="display:flex;justify-content:space-between;align-items:center">
+      <span>💵 Spending</span>
+      <button class="ic" id="spendToggle" style="font-size:16px">✕</button>
+    </div>${body}</div>`;
+}
+
 function pantryView() {
   let html = `<div class="addbar">
     <input id="pname" placeholder="Item" style="flex:1;min-width:120px" />
@@ -1132,32 +1300,59 @@ function pantryView() {
   </div>
   <input id="pantryPhotoInput" type="file" accept="image/*,application/pdf" style="display:none" />
   <input id="receiptInput" type="file" accept="image/*,application/pdf" style="display:none" />
-  <div style="display:flex;gap:8px;margin-bottom:12px">
-    <button class="btn" id="pantryPhotoBtn" ${pantryPhotoBusy || receiptBusy ? "disabled" : ""}
-      style="background:#e7e5e4;color:#44403c;font-size:14px;flex:1">
-      ${pantryPhotoBusy ? "Reading…" : "📷 Add an item"}</button>
-    <button class="btn" id="receiptBtn" ${pantryPhotoBusy || receiptBusy ? "disabled" : ""}
-      style="background:#e7e5e4;color:#44403c;font-size:14px;flex:1">
-      ${receiptBusy ? "Reading receipt…" : "🧾 Add from receipt"}</button>
+  <input id="barcodeInput" type="file" accept="image/*" capture="environment" style="display:none" />`;
+
+  const busy = pantryPhotoBusy || receiptBusy || barcodeBusy;
+  const scanBtn = (id, label, working) =>
+    `<button class="btn" id="${id}" ${busy ? "disabled" : ""}
+      style="background:#e7e5e4;color:#44403c;font-size:13px;flex:1;padding:0 6px">${working || label}</button>`;
+  html += `<div style="display:flex;gap:6px;margin-bottom:6px">
+    ${scanBtn("pantryPhotoBtn", "📷 Photo", pantryPhotoBusy && "Reading…")}
+    ${scanBtn("barcodeBtn", "🏷️ Barcode", barcodeBusy && "Looking up…")}
+    ${scanBtn("receiptBtn", "🧾 Receipt", receiptBusy && "Reading…")}
   </div>`;
 
+  if (barcodeManual != null) {
+    html += `<div style="display:flex;gap:6px;margin-bottom:12px">
+      <input id="barcodeCode" value="${esc(barcodeManual)}" inputmode="numeric" placeholder="Barcode number"
+        style="flex:1;padding:8px 10px;border:1px solid #d6d3d1;border-radius:8px;font-size:14px" />
+      <button class="btn btn-dark" id="barcodeGo" ${busy ? "disabled" : ""} style="width:auto;padding:0 14px">Look up</button>
+      <button class="ic" id="barcodeManualClose" title="cancel">✕</button>
+    </div>`;
+  } else {
+    html += `<p style="text-align:right;margin-bottom:12px">
+      <button class="ic link" id="barcodeManualOpen" style="font-size:11px;border:0;background:none;cursor:pointer;color:#0284c7;width:auto">type a barcode number</button>
+    </p>`;
+  }
+
   if (receiptItems) {
+    // Prices are tracked for everything you keep, food or not — the receipt total
+    // is the receipt total.
+    const kept = receiptItems.filter(x => x.use);
+    const total = kept.reduce((s, x) => s + (+x.price || 0), 0);
     html += `<div class="parsed" style="margin-bottom:14px">
       <div class="parsed-head">Receipt — food items are checked; non-food is unchecked. Adjust and add.</div>`;
     receiptItems.forEach((it, i) => {
       const pkgs = it.pkg_base > 0 ? +(it.base / it.pkg_base).toFixed(2) : it.base;
       const nonFood = it.food === false;
-      html += `<div class="pitem" style="gap:6px;align-items:center;${nonFood ? "opacity:.55" : ""}">
+      html += `<div class="pitem" style="gap:6px;align-items:center;flex-wrap:wrap;${nonFood ? "opacity:.55" : ""}">
         <input type="checkbox" data-ruse="${i}" ${it.use ? "checked" : ""} style="accent-color:#059669;width:16px;height:16px;flex:none" />
         <input data-rname="${i}" value="${esc(it.name)}" style="flex:2;min-width:80px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 7px;font-size:13px" />
         ${nonFood ? `<span class="meta" style="font-size:10px;background:#f5f5f4;padding:1px 5px;border-radius:6px;flex:none">non-food</span>` : ""}
         <input data-rpkg="${i}" value="${esc(pkgs)}" inputmode="decimal" title="how many you bought"
           style="width:48px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 4px;font-size:13px;text-align:center" />
         <span class="meta" style="min-width:52px;max-width:80px">${esc(it.pkg_label || "each")}</span>
+        <span class="meta" style="flex:none">$</span>
+        <input data-rprice="${i}" value="${it.price ? esc(it.price) : ""}" inputmode="decimal" placeholder="—" title="what this line cost"
+          style="width:56px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 4px;font-size:13px;text-align:right" />
       </div>`;
     });
-    html += `<div class="actions" style="padding:12px">
-        <button class="btn btn-green" id="receiptConfirm">Add ${receiptItems.filter(x => x.use).length} to pantry</button>
+    html += `<div style="padding:8px 12px;background:#fafaf9;border-top:1px solid #f5f5f4;display:flex;justify-content:space-between">
+        <span class="meta">${kept.length} item${kept.length === 1 ? "" : "s"} checked</span>
+        <span class="meta" style="font-weight:600">${total > 0 ? "$" + total.toFixed(2) : "no prices read"}</span>
+      </div>
+      <div class="actions" style="padding:12px">
+        <button class="btn btn-green" id="receiptConfirm">Add ${kept.length} to pantry</button>
         <button class="btn btn-dark" id="receiptCancel">Cancel</button>
       </div></div>`;
   }
@@ -1166,6 +1361,7 @@ function pantryView() {
     const p = pantryPending;
     html += `<div class="parsed" style="margin-bottom:14px">
       <div class="parsed-head">Found this — adjust if needed, then add</div>
+      ${p.product ? `<div style="padding:8px 12px 0"><span class="meta">scanned: ${esc([p.brand, p.product].filter(Boolean).join(" "))}</span></div>` : ""}
       <div class="pitem" style="gap:6px;align-items:center;flex-wrap:wrap">
         <input id="ppName" value="${esc(p.name)}" style="flex:2;min-width:100px;border:1px solid #e7e5e4;border-radius:6px;padding:6px 8px;font-size:14px" />
         <input id="ppAmt" value="${esc(p.base)}" inputmode="decimal" style="width:70px;border:1px solid #e7e5e4;border-radius:6px;padding:6px;font-size:14px;text-align:center" />
@@ -1211,7 +1407,7 @@ function pantryView() {
       <button class="ic del" data-pgroupdel="${esc(g.name)}" title="remove all of this item">🗑</button>
     </div>${useOpen ? pantryUseEditor(g, pantryUse) : ""}`;
   }).join("");
-  return html;
+  return html + spendPanel();
 }
 
 function wire() {
@@ -1280,6 +1476,8 @@ function wire() {
   }
   const psc = $("#planSearchClear"); if (psc) psc.onclick = () => { planSearch = ""; renderPicker(true); };
   document.querySelectorAll("[data-plansort]").forEach(b => b.onclick = () => { planSort = b.dataset.plansort; render(); });
+  const pushBtn = $("#pushToggle");
+  if (pushBtn) pushBtn.onclick = () => push.subscribed ? disablePush() : enablePush();
   document.querySelectorAll("[data-planpick]").forEach(b => b.onclick = () => {
     planAddRecipe = b.dataset.planpick; err = ""; renderPicker(false);
   });
@@ -1299,6 +1497,9 @@ function wire() {
 
   // saved tab
   document.querySelectorAll("[data-sort]").forEach(b => b.onclick = () => { savedSort = b.dataset.sort; render(); });
+  const ssr = $("#savedSearch");
+  if (ssr) ssr.oninput = () => { savedSearch = ssr.value; renderSaved(true); };
+  const ssc = $("#savedSearchClear"); if (ssc) ssc.onclick = () => { savedSearch = ""; renderSaved(true); };
   document.querySelectorAll("[data-open-recipe]").forEach(b => b.onclick = async () => {
     viewing = await api(`/recipes/${b.dataset.openRecipe}`); servings = 1; cookStep = -1; showPhotos = false; shareOpen = false; shareMsg = ""; err = ""; render();
     ensureRecipeTimes();
@@ -1376,13 +1577,43 @@ function wire() {
     rcb.onclick = () => rci.click();
     rci.onchange = () => { if (rci.files && rci.files[0]) receiptFromPhoto(rci.files[0]); rci.value = ""; };
   }
+  const bcb = $("#barcodeBtn"), bci = $("#barcodeInput");
+  if (bcb && bci) {
+    bcb.onclick = () => bci.click();
+    bci.onchange = () => { if (bci.files && bci.files[0]) barcodeFromPhoto(bci.files[0]); bci.value = ""; };
+  }
+  const bmo = $("#barcodeManualOpen");
+  if (bmo) bmo.onclick = () => { barcodeManual = ""; render(); const el = $("#barcodeCode"); if (el) el.focus(); };
+  const bmc = $("#barcodeManualClose"); if (bmc) bmc.onclick = () => { barcodeManual = null; err = ""; render(); };
+  const bcc = $("#barcodeCode");
+  if (bcc) {
+    bcc.oninput = () => { barcodeManual = bcc.value; };
+    bcc.onkeydown = e => { if (e.key === "Enter") $("#barcodeGo").click(); };
+  }
+  const bcg = $("#barcodeGo");
+  if (bcg) bcg.onclick = () => {
+    const code = (barcodeManual || "").replace(/\D/g, "");
+    if (!code) { err = "Type the number printed under the barcode."; render(); return; }
+    lookupBarcode({ code }, code);
+  };
   document.querySelectorAll("[data-ruse]").forEach(c => c.onchange = () => { receiptItems[+c.dataset.ruse].use = c.checked; render(); });
   document.querySelectorAll("[data-rname]").forEach(el => el.oninput = () => { receiptItems[+el.dataset.rname].name = el.value; });
   document.querySelectorAll("[data-rpkg]").forEach(el => el.oninput = () => {
     const it = receiptItems[+el.dataset.rpkg];
     const pkgs = +el.value || 0;
+    it.packages = pkgs;
     it.base = +(pkgs * (it.pkg_base || 1)).toFixed(2); // packages → base amount for storage
   });
+  document.querySelectorAll("[data-rprice]").forEach(el => el.oninput = () => {
+    receiptItems[+el.dataset.rprice].price = +el.value || 0;
+  });
+  document.querySelectorAll("[data-rprice]").forEach(el => el.onblur = () => render()); // refresh the total
+  const spt = $("#spendToggle");
+  if (spt) spt.onclick = () => {
+    spendOpen = !spendOpen;
+    render();
+    if (spendOpen) loadSpend();
+  };
   const rcc = $("#receiptConfirm"); if (rcc) rcc.onclick = confirmReceipt;
   const rcx = $("#receiptCancel"); if (rcx) rcx.onclick = () => { receiptItems = null; err = ""; render(); };
   const ppn = $("#ppName"); if (ppn) ppn.oninput = () => { pantryPending.name = ppn.value; };
@@ -1784,6 +2015,53 @@ async function confirmPantryPhoto() {
   refresh();
 }
 
+// Decode a barcode out of a still photo without a round trip, where the browser
+// can do it (Chrome/Android). Safari has no BarcodeDetector, so this returns ""
+// there and the photo goes to the server for the model to read instead.
+async function decodeBarcodeLocally(file) {
+  try {
+    if (!("BarcodeDetector" in window)) return "";
+    const formats = await window.BarcodeDetector.getSupportedFormats();
+    const want = ["ean_13", "ean_8", "upc_a", "upc_e", "code_128"].filter(f => formats.includes(f));
+    if (!want.length) return "";
+    const bitmap = await createImageBitmap(file);
+    const found = await new window.BarcodeDetector({ formats: want }).detect(bitmap);
+    bitmap.close();
+    return (found[0] && found[0].rawValue || "").replace(/\D/g, "");
+  } catch { return ""; }
+}
+
+// Shared tail of every scan path (local decode, photo read, typed number):
+// look the code up and drop the result into the same review box the item-photo
+// flow uses.
+async function lookupBarcode(body, codeForRetry) {
+  err = ""; barcodeBusy = true; pantryPending = null; render();
+  try {
+    const r = await api("/barcode", J({ m: "POST", b: body }));
+    if (r.error) { barcodeManual = r.code || codeForRetry || ""; throw new Error(r.error); }
+    pantryPending = { name: r.name, base: r.base, base_unit: r.base_unit,
+      pkg_label: r.pkg_label, pkg_base: r.pkg_base, product: r.product, brand: r.brand };
+    barcodeManual = null;
+  } catch (e) {
+    err = e && e.message ? e.message : "Couldn't look up that barcode.";
+  } finally {
+    barcodeBusy = false; render();
+  }
+}
+
+async function barcodeFromPhoto(file) {
+  err = ""; barcodeBusy = true; render();
+  const code = await decodeBarcodeLocally(file);
+  if (code) return lookupBarcode({ code }, code);
+  try {
+    const { base64, mediaType } = await readUpload(file, 1600); // small digits — keep detail
+    return await lookupBarcode({ image: base64, image_type: mediaType });
+  } catch (e) {
+    err = e && e.message ? e.message : "Couldn't read that photo.";
+    barcodeBusy = false; render();
+  }
+}
+
 async function receiptFromPhoto(file) {
   err = ""; receiptBusy = true; receiptItems = null; render();
   try {
@@ -1818,8 +2096,25 @@ async function confirmReceipt() {
     const sl = slMap[it.name.toLowerCase()] || null;
     await api("/pantry", J({ m: "POST", b: { ...it, storage: sl ? sl.where : "", shelf_life: sl } }));
   }
+  // Record what the trip cost, line by line — lines with no price are skipped.
+  // Kept separate from the pantry merge so each receipt line stays its own entry.
+  const priced = chosen.filter(x => +x.price > 0).map(x => ({
+    name: x.name.trim(), price: +x.price, packages: +x.packages || 1, source: "receipt",
+  }));
+  if (priced.length) {
+    try { await api("/purchases", J({ m: "POST", b: { items: priced, ym: ymd(new Date()).slice(0, 7) } })); }
+    catch { /* the pantry add already landed; spend tracking is a bonus */ }
+    spend = null;
+    if (spendOpen) loadSpend();
+  }
   receiptItems = null; err = "";
   refresh();
+}
+
+async function loadSpend() {
+  try { spend = await api("/spend?months=6"); }
+  catch { spend = { months: [], top: [], changes: [] }; }
+  if (tab === "pantry" && spendOpen) render();
 }
 
 // ---------- auth screen + boot ----------
@@ -1874,6 +2169,7 @@ async function startApp() {
   $("#app").style.display = "block";
   tab = "recipe"; viewing = null;
   await refresh();
+  initPush().then(() => { if (tab === "plan") render(); }); // in the background — never gates the UI
 }
 
 async function boot() {
