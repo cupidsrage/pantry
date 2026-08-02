@@ -273,6 +273,39 @@ app.delete("/api/pantry/:id", requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// Take `useBase` base-units of one item out of a user's stock, oldest batch
+// first. A batch that hits zero is deleted; the rest keep their remaining
+// amount. Returns how much was actually removed (less than asked if short).
+const normName = (s) => String(s).toLowerCase().trim().replace(/s$/, "");
+function consumePantry(userId, name, useBase) {
+  let need = +useBase;
+  let removed = 0;
+  const batches = db.prepare("SELECT * FROM pantry WHERE user_id=? ORDER BY added ASC, id ASC").all(userId)
+    .filter((p) => normName(p.name) === normName(name));
+  for (const b of batches) {
+    if (need <= 0) break;
+    const take = Math.min(b.base, need);
+    const left = +(b.base - take).toFixed(2);
+    need = +(need - take).toFixed(2);
+    removed = +(removed + take).toFixed(2);
+    if (left <= 0) db.prepare("DELETE FROM pantry WHERE id=?").run(b.id);
+    else db.prepare("UPDATE pantry SET base=? WHERE id=?").run(left, b.id);
+  }
+  return removed;
+}
+
+// Manually use up part of an item (spilled, ate some, cooked off-recipe) without
+// wiping out the whole stock. Body: {name, use_base} in base units.
+app.post("/api/pantry/use", requireAuth, (req, res) => {
+  const { name, use_base } = req.body;
+  const amt = Number(use_base);
+  if (!name?.trim()) return res.status(400).json({ error: "name required" });
+  if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ error: "amount must be greater than 0" });
+  const removed = db.transaction(() => consumePantry(req.userId, name.trim(), amt))();
+  if (removed <= 0) return res.status(404).json({ error: "nothing in stock for that item" });
+  res.json({ ok: true, removed });
+});
+
 // ---------- list API ----------
 app.get("/api/list", requireAuth, (req, res) =>
   res.json(db.prepare("SELECT * FROM list WHERE user_id=? ORDER BY id").all(req.userId)));
@@ -314,21 +347,8 @@ app.post("/api/purchase", requireAuth, (req, res) => {
 // subtract cooked recipe usage (in base units) from pantry stock, oldest batch first
 app.post("/api/cook", requireAuth, (req, res) => {
   const items = req.body.items || []; // [{name, use_base}]
-  const norm = (s) => s.toLowerCase().trim().replace(/s$/, "");
   const tx = db.transaction(() => {
-    for (const it of items) {
-      let need = it.use_base;
-      const batches = db.prepare("SELECT * FROM pantry WHERE user_id=? ORDER BY added ASC, id ASC").all(req.userId)
-        .filter((p) => norm(p.name) === norm(it.name));
-      for (const b of batches) {
-        if (need <= 0) break;
-        const take = Math.min(b.base, need);
-        const left = +(b.base - take).toFixed(2);
-        need = +(need - take).toFixed(2);
-        if (left <= 0) db.prepare("DELETE FROM pantry WHERE id=?").run(b.id);
-        else db.prepare("UPDATE pantry SET base=? WHERE id=?").run(left, b.id);
-      }
-    }
+    for (const it of items) consumePantry(req.userId, it.name, it.use_base);
   });
   tx();
   res.json({ ok: true });
