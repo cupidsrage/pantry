@@ -8,8 +8,11 @@ import crypto from "crypto";
 // front end runs the exact same code rather than a second copy of the rules.
 import { norm } from "./lib/units.js";
 import { planConsumption } from "./lib/pantry.js";
+import { expiryLabel } from "./lib/expiry.js";
 import { summarizeSpend } from "./lib/spend.js";
 import { mealTimes, thawAtMs, isDue, REMINDER_WINDOW_MS } from "./lib/schedule.js";
+import { weekDates, normalizeProposal, summarizePlan } from "./lib/planner.js";
+import { planShoppingList, estimateListCost } from "./lib/shopping.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -1180,6 +1183,191 @@ app.delete("/api/meals/:id", requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- weekly meal planner ----------
+// Planning is the one job in this app that's actually reasoning rather than
+// extraction — it has to weigh expiry against variety against time against
+// budget — so it runs on Sonnet. It happens roughly once a week, so the cost
+// difference against Haiku is a rounding error.
+const PLAN_MODEL = "claude-sonnet-5";
+const WEEKDAY = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+// Everything the planner needs to know about the kitchen, as compact text.
+function planContext(userId, days) {
+  const recipes = db.prepare(
+    "SELECT id,title,prep_min,cook_min,nutrition,ingredients FROM recipes WHERE user_id=? ORDER BY created DESC LIMIT 60"
+  ).all(userId).map((r) => ({
+    id: r.id, title: r.title, prep_min: r.prep_min || 0, cook_min: r.cook_min || 0,
+    nutrition: r.nutrition ? JSON.parse(r.nutrition) : null,
+    ingredients: JSON.parse(r.ingredients || "[]"),
+  }));
+
+  const pantry = db.prepare("SELECT * FROM pantry WHERE user_id=?").all(userId)
+    .map((p) => ({ ...p, shelf_life: p.shelf_life ? JSON.parse(p.shelf_life) : null }));
+
+  // What's been eaten lately, so the planner doesn't serve chilli three weeks running.
+  const since = new Date(Date.parse(days[0] + "T00:00:00Z") - 21 * 86400000).toISOString().slice(0, 10);
+  const recent = db.prepare(
+    "SELECT DISTINCT title FROM meal_plan WHERE user_id=? AND date>=? AND date<? ORDER BY date DESC LIMIT 25"
+  ).all(userId, since, days[0]).map((m) => m.title);
+
+  return { recipes, pantry, recent };
+}
+
+// Pantry lines ordered by urgency — what's about to go off has to be the first
+// thing the planner sees, since using it up is the whole point.
+function pantryLines(pantry, now = Date.now()) {
+  return pantry
+    .map((p) => ({ p, exp: expiryLabel(p, now) }))
+    .sort((a, b) => (a.exp ? a.exp.days : Infinity) - (b.exp ? b.exp.days : Infinity))
+    .slice(0, 60)
+    .map(({ p, exp }) =>
+      `- ${p.name}: ${p.base} ${p.base_unit}${exp ? ` (${exp.text})` : ""}${p.storage === "freezer" ? " [frozen]" : ""}`)
+    .join("\n");
+}
+
+function recipeLines(recipes) {
+  return recipes.map((r) => {
+    const mins = (r.prep_min || 0) + (r.cook_min || 0);
+    const kcal = r.nutrition && r.nutrition.calories ? `, ${Math.round(r.nutrition.calories)} kcal/serving` : "";
+    const ings = r.ingredients.map((i) => i.name).slice(0, 8).join(", ");
+    return `${r.id} | ${r.title} | ${mins ? mins + " min" : "time unknown"}${kcal} | ${ings}`;
+  }).join("\n");
+}
+
+function constraintLines(c = {}) {
+  const out = [];
+  if (Number(c.budget) > 0) out.push(`- Keep the shopping under about $${Number(c.budget)}.`);
+  if (Number(c.maxWeeknightMin) > 0)
+    out.push(`- Monday to Friday, nothing that takes longer than ${Number(c.maxWeeknightMin)} minutes total.`);
+  if (Number(c.vegetarianNights) > 0)
+    out.push(`- Exactly ${Number(c.vegetarianNights)} of the seven meals must be vegetarian (no meat, poultry or fish).`);
+  if (Number(c.skipDays) > 0) out.push(`- Leave ${Number(c.skipDays)} day(s) unplanned for leftovers or eating out.`);
+  if (c.notes) out.push(`- ${String(c.notes).slice(0, 300)}`);
+  return out.length ? out.join("\n") : "- None beyond the general rules.";
+}
+
+const PLAN_PROMPT = ({ days, recipes, pantry, recent, constraints }) =>
+`Plan a week of dinners for one household. Choose ONLY from the saved recipes listed below, by their id.
+
+Return ONLY MINIFIED JSON, no prose, no markdown:
+{"days":[{"d":"YYYY-MM-DD","r":recipe_id,"t":"HH:MM","why":"short reason"}],"note":"one sentence about the week"}
+
+Rules, in priority order:
+1. Use up pantry stock that expires soonest. This matters more than anything else — food about to go off should drive the plan.
+2. Prefer recipes the pantry already covers, so the shopping trip stays small.
+3. Don't repeat a recipe within the week, and avoid anything in RECENTLY EATEN unless the pantry strongly favours it.
+4. Vary the protein and the style night to night. Don't serve chicken four times.
+5. Obey every constraint exactly.
+
+One meal per day, every day, unless a constraint says otherwise. If a day genuinely shouldn't have a meal, leave it out.
+t: when to eat, 24-hour "HH:MM". Use 18:00 unless a constraint suggests otherwise.
+why: at most 12 words, the real reason ("uses spinach expiring Tue", "quick after work", "vegetarian night").
+
+WEEK:
+${days.map((d) => `${d} (${WEEKDAY[new Date(d + "T00:00:00Z").getUTCDay()]})`).join("\n")}
+
+CONSTRAINTS:
+${constraints}
+
+PANTRY, most urgent first:
+${pantry || "(empty)"}
+
+RECENTLY EATEN (last 3 weeks):
+${recent || "(nothing recorded)"}
+
+SAVED RECIPES — id | title | total time | calories | ingredients:
+${recipes}`;
+
+app.post("/api/plan/generate", requireAuth, async (req, res) => {
+  if (!process.env.ANTHROPIC_API_KEY)
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY not set on the server" });
+  const weekStart = String(req.body.weekStart || "").slice(0, 10);
+  const days = weekDates(weekStart);
+  if (!days.length) return res.status(400).json({ error: "a valid weekStart (YYYY-MM-DD) is required" });
+
+  const { recipes, pantry, recent } = planContext(req.userId, days);
+  if (recipes.length < 3)
+    return res.status(422).json({ error: "Save at least 3 recipes first — the planner picks from your saved ones." });
+
+  let raw;
+  try {
+    raw = (await callClaude(PLAN_PROMPT({
+      days,
+      recipes: recipeLines(recipes),
+      pantry: pantryLines(pantry),
+      recent: recent.join(", "),
+      constraints: constraintLines(req.body.constraints),
+    }), 2000, PLAN_MODEL)).replace(/```json|```/g, "").trim();
+  } catch (e) {
+    return res.status(422).json({ error: "Couldn't build a plan just now. Try again in a moment." });
+  }
+
+  const obj = looseJson(raw);
+  const { meals, dropped, empty } = normalizeProposal(obj, { recipes, weekStart });
+  if (!meals.length)
+    return res.status(422).json({ error: "The planner didn't return anything usable. Try again." });
+
+  // What this plan would cost you at the shop, and what it needs you to buy.
+  const chosen = meals.map((m) => recipes.find((r) => r.id === m.recipe_id)).filter(Boolean);
+  const shopping = planShoppingList(chosen, pantry);
+  const purchases = db.prepare("SELECT name,price,packages FROM purchases WHERE user_id=?").all(req.userId);
+
+  res.json({
+    weekStart,
+    meals,
+    dropped,
+    empty,
+    note: String((obj && obj.note) || "").slice(0, 300),
+    summary: summarizePlan(meals, recipes),
+    shopping,
+    cost: estimateListCost(shopping, purchases),
+  });
+});
+
+// Write an accepted plan. Nothing here trusts the client either — every meal is
+// re-checked against the user's own recipes and the week it claims to be in.
+app.post("/api/plan/apply", requireAuth, (req, res) => {
+  const weekStart = String(req.body.weekStart || "").slice(0, 10);
+  const days = weekDates(weekStart);
+  if (!days.length) return res.status(400).json({ error: "a valid weekStart is required" });
+
+  const recipes = db.prepare("SELECT id,title,ingredients FROM recipes WHERE user_id=?").all(req.userId)
+    .map((r) => ({ ...r, ingredients: JSON.parse(r.ingredients || "[]") }));
+  const { meals } = normalizeProposal({ days: req.body.meals || [] }, { recipes, weekStart });
+  if (!meals.length) return res.status(400).json({ error: "no valid meals to save" });
+
+  const replace = req.body.replace !== false; // default: this plan owns the week
+  const addToList = !!req.body.addToList;
+
+  const result = db.transaction(() => {
+    if (replace)
+      db.prepare("DELETE FROM meal_plan WHERE user_id=? AND date>=? AND date<=?")
+        .run(req.userId, days[0], days[6]);
+    const ins = db.prepare("INSERT INTO meal_plan (user_id,date,meal_time,recipe_id,title,created) VALUES (?,?,?,?,?,?)");
+    for (const m of meals) ins.run(req.userId, m.date, m.meal_time, m.recipe_id, m.title, Date.now());
+
+    if (!addToList) return { added: 0 };
+    const pantry = db.prepare("SELECT * FROM pantry WHERE user_id=?").all(req.userId);
+    const chosen = meals.map((m) => recipes.find((r) => r.id === m.recipe_id)).filter(Boolean);
+    let added = 0;
+    for (const item of planShoppingList(chosen, pantry)) {
+      // Merge into an existing line rather than making a second one.
+      const existing = db.prepare("SELECT * FROM list WHERE user_id=?").all(req.userId)
+        .find((l) => norm(l.name) === norm(item.name));
+      if (existing) {
+        db.prepare("UPDATE list SET packages=? WHERE id=?").run(existing.packages + item.packages, existing.id);
+      } else {
+        db.prepare("INSERT INTO list (name,packages,base_unit,pkg_label,pkg_base,checked,user_id) VALUES (?,?,?,?,?,0,?)")
+          .run(item.name, item.packages, item.base_unit, item.pkg_label, item.pkg_base, req.userId);
+      }
+      added++;
+    }
+    return { added };
+  })();
+
+  res.json({ ok: true, saved: meals.length, listItems: result.added });
+});
+
 // ---------- web push ----------
 // Reminders go out as *payload-free* pushes: the notification text lives in
 // push_queue, and the service worker fetches it when the push wakes it up. That
@@ -1396,6 +1584,6 @@ if (pushEnabled()) {
 }
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-08-03a" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-08-03b" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-08-03a]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-08-03b]`));

@@ -255,6 +255,136 @@ async function disablePush() {
   }
 }
 
+// ---------- weekly planner ----------
+// null when closed. Constraint edits update this object without re-rendering,
+// so typing in the form doesn't drop the caret; only button presses re-render.
+let planner = null;
+
+const emptyPlanner = () => ({
+  busy: false, error: "", proposal: null, addToList: true,
+  constraints: { budget: "", maxWeeknightMin: "", vegetarianNights: "", skipDays: "", notes: "" },
+});
+
+async function generatePlan() {
+  planner.busy = true; planner.error = ""; render();
+  try {
+    const r = await api("/plan/generate", J({ m: "POST", b: {
+      weekStart: ymd(planWeekStart), constraints: planner.constraints,
+    }}));
+    if (r.error) throw new Error(r.error);
+    planner.proposal = r;
+  } catch (e) {
+    planner.error = e && e.message ? e.message : "Couldn't build a plan.";
+  } finally {
+    planner.busy = false; render();
+  }
+}
+
+async function applyPlan() {
+  planner.busy = true; planner.error = ""; render();
+  try {
+    const p = planner.proposal;
+    const r = await api("/plan/apply", J({ m: "POST", b: {
+      weekStart: p.weekStart, meals: p.meals, replace: true, addToList: planner.addToList,
+    }}));
+    if (r.error) throw new Error(r.error);
+    planner = null;
+    await loadMeals();
+  } catch (e) {
+    planner.error = e && e.message ? e.message : "Couldn't save the plan.";
+    planner.busy = false; render();
+  }
+}
+
+function plannerForm() {
+  const c = planner.constraints;
+  const field = (key, label, ph, wide) => `
+    <label style="flex:${wide ? "1 1 100%" : "1 1 44%"};min-width:0">
+      <span class="meta" style="display:block;margin-bottom:3px">${label}</span>
+      <input data-pc="${key}" value="${esc(c[key])}" placeholder="${ph}" ${wide ? "" : 'inputmode="numeric"'}
+        style="width:100%;padding:7px 9px;border:1px solid #d6d3d1;border-radius:8px;font-size:14px" />
+    </label>`;
+  return `
+    <div style="padding:12px">
+      <p class="meta" style="margin-bottom:10px">Leave anything blank to let the planner decide.</p>
+      <div style="display:flex;flex-wrap:wrap;gap:8px">
+        ${field("budget", "Budget ($)", "120")}
+        ${field("maxWeeknightMin", "Weeknight max (min)", "45")}
+        ${field("vegetarianNights", "Vegetarian nights", "2")}
+        ${field("skipDays", "Nights off", "1")}
+        ${field("notes", "Anything else", "no fish, kids eat early Wed", true)}
+      </div>
+      <button class="btn btn-green" id="planGo" ${planner.busy ? "disabled" : ""} style="margin-top:12px">
+        ${planner.busy ? "Thinking…" : "Build the week"}</button>
+      ${planner.error ? `<p class="err">${esc(planner.error)}</p>` : ""}
+    </div>`;
+}
+
+function plannerReview() {
+  const p = planner.proposal;
+  const s = p.summary;
+  const dayRow = (m) => {
+    const d = new Date(m.date + "T00:00:00");
+    return `<div style="display:flex;gap:10px;padding:7px 0;border-top:1px solid #f5f5f4">
+      <span style="flex:none;width:46px;font-weight:600;font-size:13px">${DOW[d.getDay()]} ${d.getDate()}</span>
+      <span style="flex:1;min-width:0">
+        <span style="font-size:13px;font-weight:500;text-transform:capitalize">${esc(m.title)}</span>
+        ${m.why ? `<br><span class="meta" style="font-size:11px">${esc(m.why)}</span>` : ""}
+      </span>
+      <span class="meta" style="flex:none;font-size:11px">${fmtTime(m.meal_time)}</span>
+    </div>`;
+  };
+  const stat = (val, label) =>
+    `<div style="flex:1;text-align:center"><div style="font-size:16px;font-weight:700">${val}</div>
+     <div class="meta" style="font-size:10px">${label}</div></div>`;
+
+  return `
+    <div style="padding:12px">
+      ${p.note ? `<p class="meta" style="margin-bottom:8px">${esc(p.note)}</p>` : ""}
+      <div style="display:flex;gap:6px;padding:8px 0;background:#fafaf9;border-radius:8px;margin-bottom:6px">
+        ${stat(s.meals, "meals")}
+        ${stat(minutesToText(s.minutes) || "—", "cooking")}
+        ${stat(s.caloriesPerDay == null ? "—" : s.caloriesPerDay, "kcal/day")}
+        ${stat(p.cost.total > 0 ? "$" + p.cost.total.toFixed(0) : "—", "to buy")}
+      </div>
+      ${p.meals.map(dayRow).join("")}
+      ${p.empty.length ? `<p class="meta" style="margin-top:8px">Left open: ${p.empty.map(d => DOW[new Date(d + "T00:00:00").getDay()]).join(", ")}</p>` : ""}
+      ${p.dropped.length ? `<p class="meta" style="margin-top:6px;color:#d97706">Skipped ${p.dropped.length} suggestion${p.dropped.length > 1 ? "s" : ""} that didn't check out.</p>` : ""}
+
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid #f5f5f4">
+        <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer">
+          <input type="checkbox" id="planAddList" ${planner.addToList ? "checked" : ""}
+            style="accent-color:#059669;width:16px;height:16px;flex:none;margin-top:2px" />
+          <span style="font-size:13px">Add the ${p.shopping.length} missing item${p.shopping.length === 1 ? "" : "s"} to my list
+            ${p.cost.total > 0 ? `<br><span class="meta">about $${p.cost.total.toFixed(2)}${p.cost.unknown.length ? ` + ${p.cost.unknown.length} never bought before` : ""}</span>` : ""}
+          </span>
+        </label>
+        ${p.shopping.length ? `<p class="meta" style="font-size:11px;margin-top:6px">
+          ${p.shopping.slice(0, 6).map(i => esc(i.name)).join(", ")}${p.shopping.length > 6 ? `, +${p.shopping.length - 6} more` : ""}</p>` : ""}
+      </div>
+
+      <div style="display:flex;gap:6px;margin-top:12px">
+        <button class="btn btn-green" id="planApply" ${planner.busy ? "disabled" : ""} style="flex:2">
+          ${planner.busy ? "Saving…" : "Use this week"}</button>
+        <button class="btn" id="planRetry" ${planner.busy ? "disabled" : ""}
+          style="flex:1;background:#e7e5e4;color:#44403c">Try again</button>
+      </div>
+      <p class="meta" style="font-size:11px;text-align:center;margin-top:8px">Replaces anything already planned this week.</p>
+      ${planner.error ? `<p class="err">${esc(planner.error)}</p>` : ""}
+    </div>`;
+}
+
+function plannerPanel() {
+  if (!planner) return "";
+  return `<div class="parsed" style="margin-bottom:12px">
+    <div class="parsed-head" style="display:flex;justify-content:space-between;align-items:center">
+      <span>✨ Plan my week</span>
+      <button class="ic" id="planClose" style="font-size:16px">✕</button>
+    </div>
+    ${planner.proposal ? plannerReview() : plannerForm()}
+  </div>`;
+}
+
 // Reminder on/off row at the top of the Plan tab. Hidden entirely when the
 // server has no VAPID keys or the browser can't do push.
 function pushToggleRow() {
@@ -336,6 +466,9 @@ function planView() {
       <span style="font-weight:600;font-size:15px">${label}</span>
       <button class="ic" id="planNext" style="border:1px solid #d6d3d1;border-radius:8px;padding:4px 10px">→</button>
     </div>`;
+  if (saved.length >= 3 && !planner)
+    html += `<button class="btn btn-sky" id="planOpen" style="margin-bottom:12px">✨ Plan my week</button>`;
+  html += plannerPanel();
   if (!saved.length)
     html += `<p class="meta" style="text-align:center;margin-bottom:10px">Tip: save recipes first, then add them to days here.</p>`;
 
@@ -1363,6 +1496,22 @@ function wire() {
   document.querySelectorAll("[data-plansort]").forEach(b => b.onclick = () => { planSort = b.dataset.plansort; render(); });
   const pushBtn = $("#pushToggle");
   if (pushBtn) pushBtn.onclick = () => push.subscribed ? disablePush() : enablePush();
+
+  const planOpenBtn = $("#planOpen");
+  if (planOpenBtn) planOpenBtn.onclick = () => { planner = emptyPlanner(); render(); };
+  const planCloseBtn = $("#planClose");
+  if (planCloseBtn) planCloseBtn.onclick = () => { planner = null; render(); };
+  // Constraint fields write straight to state so typing never triggers a
+  // re-render, which would drop the caret mid-word.
+  document.querySelectorAll("[data-pc]").forEach(el => el.oninput = () => {
+    planner.constraints[el.dataset.pc] = el.value;
+  });
+  const planGoBtn = $("#planGo"); if (planGoBtn) planGoBtn.onclick = generatePlan;
+  const planRetryBtn = $("#planRetry");
+  if (planRetryBtn) planRetryBtn.onclick = () => { planner.proposal = null; generatePlan(); };
+  const planApplyBtn = $("#planApply"); if (planApplyBtn) planApplyBtn.onclick = applyPlan;
+  const planListChk = $("#planAddList");
+  if (planListChk) planListChk.onchange = () => { planner.addToList = planListChk.checked; };
   document.querySelectorAll("[data-planpick]").forEach(b => b.onclick = () => {
     planAddRecipe = b.dataset.planpick; err = ""; renderPicker(false);
   });

@@ -43,6 +43,39 @@ parses, that everything it imports from `/lib` is really exported, and that the
 service worker precaches those modules. The front end is one large inline script
 with no build step, so a stray bracket would otherwise ship as a blank page.
 
+## Plan my week
+
+On the **Plan** tab, once you have at least three saved recipes, **✨ Plan my
+week** builds the whole week in one go.
+
+It reads your pantry (ordered by what expires soonest), your saved recipes with
+their times and nutrition, what you've eaten in the last three weeks, and what
+you've paid for things before. You can set a budget, a weeknight time limit, a
+number of vegetarian nights, nights off, and free-text notes ("no fish, kids eat
+early Wednesday") — or leave it all blank and let it decide.
+
+You get a proposal, not a fait accompli: seven days with a one-line reason for
+each pick, the week's cooking time and calories, an estimated shop cost from your
+own price history, and the list of what you'd need to buy. Accept it and it
+writes the meal plan, adds exactly the missing ingredients to your grocery list,
+and the existing cook and thaw reminders pick it up automatically.
+
+Two things worth knowing:
+
+- **It only picks from recipes you've saved.** It won't invent meals.
+- **Nothing the model returns is trusted.** Every suggestion is checked against
+  your real recipe ids and the real week before it can become a row —
+  hallucinated recipes, duplicate days, and invented times are dropped, and the
+  review panel tells you how many were skipped.
+
+Shopping quantities are totalled across the whole week *before* pantry stock is
+subtracted. Adding recipes to the list one at a time doesn't do that, so 500g of
+chicken appears to cover both Monday and Thursday and you come home short.
+
+This is the one feature that runs on Sonnet rather than Haiku — it's weighing
+expiry against variety against time against budget, which is reasoning rather
+than extraction. It runs about once a week, so the difference is negligible.
+
 ## Cook & thaw reminders (optional)
 
 The Plan tab already works out when to start cooking and when to pull something
