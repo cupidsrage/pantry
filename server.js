@@ -4,9 +4,17 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import crypto from "crypto";
 
+// Logic shared with the browser — see lib/units.js. Served at /lib below so the
+// front end runs the exact same code rather than a second copy of the rules.
+import { norm } from "./lib/units.js";
+import { planConsumption } from "./lib/pantry.js";
+import { summarizeSpend } from "./lib/spend.js";
+import { mealTimes, thawAtMs, isDue, REMINDER_WINDOW_MS } from "./lib/schedule.js";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json({ limit: "25mb" })); // photos arrive as base64 in the body
+app.use("/lib", express.static(join(__dirname, "lib")));
 app.use(
   express.static(join(__dirname, "public"), {
     setHeaders(res, path) {
@@ -307,21 +315,13 @@ app.delete("/api/pantry/:id", requireAuth, (req, res) => {
 // Take `useBase` base-units of one item out of a user's stock, oldest batch
 // first. A batch that hits zero is deleted; the rest keep their remaining
 // amount. Returns how much was actually removed (less than asked if short).
-const normName = (s) => String(s).toLowerCase().trim().replace(/s$/, "");
+// The arithmetic lives in planConsumption so it can be tested without a database.
 function consumePantry(userId, name, useBase) {
-  let need = +useBase;
-  let removed = 0;
-  const batches = db.prepare("SELECT * FROM pantry WHERE user_id=? ORDER BY added ASC, id ASC").all(userId)
-    .filter((p) => normName(p.name) === normName(name));
-  for (const b of batches) {
-    if (need <= 0) break;
-    const take = Math.min(b.base, need);
-    const left = +(b.base - take).toFixed(2);
-    need = +(need - take).toFixed(2);
-    removed = +(removed + take).toFixed(2);
-    if (left <= 0) db.prepare("DELETE FROM pantry WHERE id=?").run(b.id);
-    else db.prepare("UPDATE pantry SET base=? WHERE id=?").run(left, b.id);
-  }
+  const batches = db.prepare("SELECT * FROM pantry WHERE user_id=?").all(userId)
+    .filter((p) => norm(p.name) === norm(name));
+  const { removed, updates, deletes } = planConsumption(batches, useBase);
+  for (const id of deletes) db.prepare("DELETE FROM pantry WHERE id=?").run(id);
+  for (const u of updates) db.prepare("UPDATE pantry SET base=? WHERE id=?").run(u.left, u.id);
   return removed;
 }
 
@@ -893,48 +893,7 @@ app.post("/api/purchases", requireAuth, (req, res) => {
 app.get("/api/spend", requireAuth, (req, res) => {
   const months = Math.min(24, Math.max(1, Number(req.query.months) || 6));
   const rows = db.prepare("SELECT * FROM purchases WHERE user_id=? ORDER BY bought DESC, id DESC").all(req.userId);
-  if (!rows.length) return res.json({ months: [], top: [], changes: [] });
-
-  const recentYms = [...new Set(rows.map((r) => r.ym))].sort().reverse().slice(0, months);
-  const inWindow = rows.filter((r) => recentYms.includes(r.ym));
-
-  const monthTotals = recentYms.map((ym) => {
-    const rs = inWindow.filter((r) => r.ym === ym);
-    return { ym, total: +rs.reduce((s, r) => s + r.price, 0).toFixed(2), n: rs.length };
-  });
-
-  const byName = new Map();
-  for (const r of inWindow) {
-    const k = normName(r.name);
-    if (!byName.has(k)) byName.set(k, { name: r.name, total: 0, n: 0 });
-    const g = byName.get(k);
-    g.total = +(g.total + r.price).toFixed(2);
-    g.n++;
-  }
-  const top = [...byName.values()].sort((a, b) => b.total - a.total).slice(0, 8);
-
-  // Unit price = line price / packages, so buying two of something doesn't read
-  // as a price hike. Compare an item's two most recent purchases.
-  const seen = new Map();
-  for (const r of rows) { // full history, newest first
-    const k = normName(r.name);
-    if (!seen.has(k)) seen.set(k, []);
-    const list = seen.get(k);
-    if (list.length < 2) list.push(r);
-  }
-  const changes = [];
-  for (const [, list] of seen) {
-    if (list.length < 2) continue;
-    const [cur, prev] = list;
-    const unit = +(cur.price / Math.max(1, cur.packages)).toFixed(2);
-    const was = +(prev.price / Math.max(1, prev.packages)).toFixed(2);
-    if (!(unit > 0) || !(was > 0) || unit === was) continue;
-    changes.push({ name: cur.name, unit, was, ym: cur.ym, wasYm: prev.ym,
-      pct: +(((unit - was) / was) * 100).toFixed(0) });
-  }
-  changes.sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct));
-
-  res.json({ months: monthTotals, top, changes: changes.slice(0, 8) });
+  res.json(summarizeSpend(rows, months));
 });
 
 // ---------- shelf-life estimation ----------
@@ -1339,8 +1298,6 @@ app.post("/api/push/pending", (req, res) => {
 // Server-side twin of the client's mealReminders(): work out when to start
 // cooking and when to pull things out of the freezer. The client renders these
 // as text in the Plan tab; here they become notifications that arrive on time.
-const REMINDER_WINDOW_MS = 30 * 60 * 1000; // don't fire something more than 30 min late
-
 function fmtClock(hhmm) {
   const [h, m] = hhmm.split(":").map(Number);
   const ap = h < 12 ? "AM" : "PM";
@@ -1367,19 +1324,16 @@ function dueReminders(userId, tzOffset, now) {
     if (!m.meal_time || !m.recipe_id) continue;
     const r = db.prepare("SELECT * FROM recipes WHERE id=? AND user_id=?").get(m.recipe_id, userId);
     if (!r) continue;
-    const [y, mo, d] = m.date.split("-").map(Number);
-    const [h, mn] = m.meal_time.split(":").map(Number);
-    if ([y, mo, d, h, mn].some((n) => !Number.isFinite(n))) continue;
     // The stored date/time is local to the shopper; tz_offset converts it to real time.
-    const eatAt = Date.UTC(y, mo - 1, d, h, mn) + tzOffset * 60000;
-
-    const total = (r.prep_min || 0) + (r.cook_min || 0);
-    const cookStart = total > 0 ? eatAt - total * 60000 : null;
+    const t = mealTimes({ date: m.date, time: m.meal_time, tzOffset,
+      prepMin: r.prep_min, cookMin: r.cook_min });
+    if (!t) continue;
+    const { eatAt, cookStart, totalMin } = t;
     if (cookStart) {
       out.push({
         key: `${m.id}:cook:${cookStart}`, at: cookStart,
         title: `Start cooking: ${r.title}`,
-        body: `Eating at ${fmtClock(m.meal_time)} · ${minutesText(total)} to go`,
+        body: `Eating at ${fmtClock(m.meal_time)} · ${minutesText(totalMin)} to go`,
         tag: `cook-${m.id}`,
       });
     }
@@ -1388,13 +1342,13 @@ function dueReminders(userId, tzOffset, now) {
     // be ready when cooking starts.
     const deadline = cookStart || eatAt;
     for (const ing of JSON.parse(r.ingredients || "[]")) {
-      const batches = pantry.filter((p) => normName(p.name) === normName(ing.name));
+      const batches = pantry.filter((p) => norm(p.name) === norm(ing.name));
       if (!batches.length) continue;
       const stateOf = (b) => b.storage || (b.shelf_life && b.shelf_life.where) || "";
       if (!batches.every((b) => stateOf(b) === "freezer")) continue; // something unfrozen is on hand
       const hours = batches.map((b) => b.shelf_life && b.shelf_life.thaw_hours).find((v) => typeof v === "number" && v > 0);
       if (!hours) continue;
-      const at = deadline - hours * 3600000;
+      const at = thawAtMs(deadline, hours);
       out.push({
         key: `${m.id}:thaw:${ing.name}:${at}`, at,
         title: `Take out to thaw: ${ing.name}`,
@@ -1421,7 +1375,7 @@ async function runReminderSweep() {
       continue;
     }
     for (const rem of due) {
-      if (rem.at > now || now - rem.at > REMINDER_WINDOW_MS) continue;
+      if (!isDue(rem.at, now, REMINDER_WINDOW_MS)) continue;
       const claimed = db.prepare("INSERT OR IGNORE INTO sent_reminders (key,user_id,sent) VALUES (?,?,?)")
         .run(rem.key, u.user_id, now).changes;
       if (!claimed) continue; // already sent on an earlier sweep
@@ -1442,6 +1396,6 @@ if (pushEnabled()) {
 }
 
 const PORT = process.env.PORT || 3000;
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-08-02a" }));
+app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-08-03a" }));
 
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-08-02a]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-08-03a]`));

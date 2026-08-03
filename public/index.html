@@ -76,95 +76,24 @@
   </div>
 </div>
 
-<script>
+<script type="module">
+// Logic the server runs too — one copy, imported by both, so the "can make"
+// badge and the stock math can't drift apart. See lib/units.js.
+import { UNITS, unitByKey, showBase, pkgsFromBase, norm } from "/lib/units.js";
+import { STORAGE_STATES } from "/lib/expiry.js";
+import { groupBatches } from "/lib/pantry.js";
+import { recipeCoverage as coverageOf, recipeSoonestExpiry as soonestExpiryOf, recipeMatch } from "/lib/recipes.js";
+
 const $ = (s, el=document) => el.querySelector(s);
 const api = (p, opt) => fetch("/api" + p, opt).then(r => r.json());
-const norm = s => s.toLowerCase().trim().replace(/s$/, "");
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const wm = n => `https://www.walmart.com/search?q=${encodeURIComponent(n)}`;
 const J = o => ({ method: o.m, headers: { "content-type": "application/json" }, body: JSON.stringify(o.b) });
 
-// Purchase units the user can pick, each mapping to a base unit (g / ml / count)
-// with a factor: amount * factor = base amount. label is what shows in the dropdown.
-const UNITS = [
-  { key: "count",  label: "count / each", base: "count", factor: 1 },
-  { key: "g",      label: "grams (g)",    base: "g",     factor: 1 },
-  { key: "kg",     label: "kilograms (kg)", base: "g",   factor: 1000 },
-  { key: "oz",     label: "ounces (oz)",  base: "g",     factor: 28.35 },
-  { key: "lb",     label: "pounds (lb)",  base: "g",     factor: 453.6 },
-  { key: "ml",     label: "milliliters (ml)", base: "ml", factor: 1 },
-  { key: "l",      label: "liters (L)",   base: "ml",    factor: 1000 },
-  { key: "floz",   label: "fluid oz",     base: "ml",    factor: 29.57 },
-  { key: "cup",    label: "cups",         base: "ml",    factor: 236.6 },
-  { key: "tbsp",   label: "tablespoons",  base: "ml",    factor: 14.79 },
-  { key: "tsp",    label: "teaspoons",    base: "ml",    factor: 4.93 },
-  { key: "stick",  label: "sticks butter", base: "g",   factor: 113 },
-  { key: "can",    label: "cans (~400g)", base: "g",     factor: 400 },
-  { key: "clove",  label: "cloves",       base: "count", factor: 1 },
-];
-const unitByKey = (k) => UNITS.find(u => u.key === k) || UNITS[0];
-
-function showBase(base, unit) {
-  if (unit === "count") return `${+base.toFixed(1)}`;
-  if (unit === "g") return base >= 1000 ? `${(base/1000).toFixed(2)} kg` : `${Math.round(base)} g`;
-  if (unit === "ml") return base >= 1000 ? `${(base/1000).toFixed(2)} L` : `${Math.round(base)} ml`;
-  return `${+base.toFixed(1)} ${unit}`;
-}
-function pkgsFromBase(base, pkgBase) { return pkgBase > 0 ? base / pkgBase : 0; }
-
-// Days of shelf life for an item's current storage state (null if unknown).
-function shelfDaysFor(it) {
-  const sl = it.shelf_life;
-  if (!sl) return null;
-  const state = it.storage || sl.where || "pantry";
-  const d = sl[state];
-  return typeof d === "number" ? d : null;
-}
-// Expiration timestamp, or null if we can't compute one.
-function expiresAt(it) {
-  if (!it.added) return null;
-  const days = shelfDaysFor(it);
-  if (days == null) return null;
-  return it.added + days * 86400000;
-}
-// Human status: "3 days left", "expires today", "expired 2 days ago".
-function expiryLabel(it) {
-  const exp = expiresAt(it);
-  if (exp == null) return null;
-  const dayMs = 86400000;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const expDay = new Date(exp); expDay.setHours(0, 0, 0, 0);
-  const diff = Math.round((expDay - today) / dayMs);
-  const base = (text, tone) => ({ text, tone, days: diff });
-  if (diff < 0) return base(`expired ${-diff}d ago`, "bad");
-  if (diff === 0) return base("use today", "warn");
-  if (diff <= 3) return base(`${diff}d left`, "warn");
-  if (diff <= 14) return base(`${diff}d left`, "ok");
-  if (diff < 60) return base(`~${Math.round(diff / 7)}wk left`, "ok");
-  return base(`~${Math.round(diff / 30)}mo left`, "ok");
-}
-const STORAGE_STATES = ["pantry", "fridge", "freezer", "thawed"];
-
-// Collapse pantry batches (multiple purchases of the same item) into one display
-// group per item. The group surfaces the OLDEST batch's expiration (use-first),
-// sums the total amount, and keeps every batch id.
-function groupedPantry() {
-  const groups = [];
-  for (const it of pantry) {
-    let g = groups.find(x => norm(x.name) === norm(it.name));
-    if (!g) { g = { name: it.name, base: 0, base_unit: it.base_unit, pkg_label: it.pkg_label, pkg_base: it.pkg_base, batches: [] }; groups.push(g); }
-    g.base = +(g.base + it.base).toFixed(2);
-    g.batches.push(it);
-  }
-  for (const g of groups) {
-    // oldest batch = earliest added (0/undefined added sorts last so real dates win)
-    g.batches.sort((a, b) => (a.added || Infinity) - (b.added || Infinity) || a.id - b.id);
-    g.oldest = g.batches[0];
-    g.expLabel = g.batches.map(expiryLabel).filter(Boolean)
-      .sort((a, b) => a.days - b.days)[0] || null; // soonest-expiring batch
-  }
-  return groups;
-}
+// Thin wrappers that bind the shared helpers to this page's live state.
+const groupedPantry = () => groupBatches(pantry);
+const recipeCoverage = (r) => coverageOf(r, pantry);
+const recipeSoonestExpiry = (r) => soonestExpiryOf(r, pantry);
 
 // Units you can type an amount in when removing part of a pantry item: every
 // unit that converts to the item's base unit, plus the item's own package size.
@@ -691,50 +620,6 @@ function recipeView() {
 }
 
 // ---------- Saved recipes ----------
-// How many of a recipe's ingredients the pantry can cover right now → {have, total}.
-function recipeCoverage(r) {
-  const ings = r.ingredients || [];
-  let have = 0;
-  for (const ing of ings) {
-    // sum all batches of this ingredient
-    const total = pantry.filter(x => norm(x.name) === norm(ing.name))
-      .reduce((s, x) => s + x.base, 0);
-    if (total >= (ing.use_base || 0)) have++;
-  }
-  return { have, total: ings.length };
-}
-
-// Soonest expiry (in days) among pantry items this recipe uses — for the
-// "expiring soon" sort, so recipes that use up aging stock rank first.
-function recipeSoonestExpiry(r) {
-  let best = Infinity;
-  for (const ing of (r.ingredients || [])) {
-    for (const b of pantry.filter(x => norm(x.name) === norm(ing.name))) {
-      const lbl = expiryLabel(b);
-      if (lbl && lbl.days < best) best = lbl.days;
-    }
-  }
-  return best; // Infinity if the recipe uses nothing that has an expiry
-}
-
-// Does a recipe match a search box? Every word typed has to turn up in the title
-// or in an ingredient name, so "chicken rice" finds a recipe with both. `via`
-// names the ingredients that carried the match, for a "has chicken" hint.
-function recipeMatch(r, query) {
-  const needle = (query || "").toLowerCase().trim();
-  if (!needle) return { hit: true, via: "" };
-  const title = (r.title || "").toLowerCase();
-  const ings = (r.ingredients || []).map(i => (i.name || "").toLowerCase());
-  const via = [];
-  for (const word of needle.split(/\s+/).filter(Boolean)) {
-    if (title.includes(word)) continue;
-    const ing = ings.find(n => n.includes(word));
-    if (!ing) return { hit: false, via: "" };
-    if (!via.includes(ing)) via.push(ing);
-  }
-  return { hit: true, via: via.join(", ") };
-}
-
 // Recipes decorated with pantry coverage and soonest-expiring stock, filtered by
 // an optional search query and ordered by `mode`. Shared by the Saved tab and
 // the Plan tab's recipe picker so both sort the same way.

@@ -23,6 +23,26 @@ ANTHROPIC_API_KEY=sk-ant-... npm start
 # http://localhost:3000
 ```
 
+## Tests
+```
+npm test
+```
+Runs `node --test` — no framework, no dev dependencies.
+
+The logic worth testing is the arithmetic: unit conversion, expiry day
+boundaries, drawing down pantry batches oldest-first, matching item names,
+recipe coverage, spend aggregation, and reminder timing. All of it lives in
+`lib/`, which the server imports directly and the browser loads from `/lib`, so
+there is one copy of each rule rather than one per side. That matters most for
+`norm()` in `lib/units.js` — the browser uses it to decide whether a recipe shows
+"✓ can make", and the server uses it to decide which batch to subtract when you
+cook. If those two ever disagreed, nothing would break loudly.
+
+`test/client.test.js` also checks that the inline `<script>` in `index.html`
+parses, that everything it imports from `/lib` is really exported, and that the
+service worker precaches those modules. The front end is one large inline script
+with no build step, so a stray bracket would otherwise ship as a blank page.
+
 ## Cook & thaw reminders (optional)
 
 The Plan tab already works out when to start cooking and when to pull something

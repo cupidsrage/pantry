@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
+    "test": "node --test",
     "vapid": "node scripts/gen-vapid.mjs"
   },
   "engines": {
