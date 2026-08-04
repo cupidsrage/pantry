@@ -120,16 +120,30 @@ price are still added to the pantry; they just don't count toward spending.
 
 ## Theme
 
-The app ships in **Dracula** — near-black, blood crimson, candle-lit violet, a
-serif title. The 🦇 button beside the title switches to **Daylight**, the
-original green-on-stone palette; the choice is remembered per device in
+The app ships in **Dracula**: near-black under a flickering candlelit glow,
+blood crimson, candle-lit violet, cobwebs in the top corners, film grain over
+everything, and blood running off a small-caps serif title. The tabs and the
+copy change with it — the pantry is the **Cellar**, saved recipes are the
+**Grimoire**, the list is the **Hunt**, the week is **Nights**, and parsing a
+recipe bleeds it.
+
+The 🦇 button beside the title switches to **Daylight**: the original palette
+*and* the original wording, unchanged. The choice is remembered per device in
 `localStorage` (nothing is stored server-side, so each phone/browser picks its
 own).
 
-Every colour in `public/index.html` goes through a CSS custom property, and a
-theme is just one block of values — `:root` holds Dracula, `:root[data-theme=
-"daylight"]` holds the original. To retint the app, change those values; to add
-a third theme, copy a block and give it a new `data-theme` name.
+Two mechanisms, both in `public/index.html`:
+
+- **Colour** goes through CSS custom properties, and a theme is one block of
+  values — `:root` holds Dracula, `:root[data-theme="daylight"]` holds the
+  original. The atmosphere (drips, cobwebs, grain, glow, button glow) is in
+  there too, as image tokens the daylight block sets to `none`, so it costs
+  nothing to turn off. Animation is skipped under `prefers-reduced-motion`.
+- **Copy** goes through `G(gothic, plain)`, which picks a voice based on the
+  current theme. Any string that should change with the theme is wrapped in it.
+
+To retint the app, change the token values; to add a third theme, copy a block
+and give it a new `data-theme` name.
 
 ## Install on your phone (PWA)
 
