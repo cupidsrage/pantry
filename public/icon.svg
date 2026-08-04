@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#059669"/>
-  <g fill="none" stroke="#ffffff" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
+  <rect width="512" height="512" rx="112" fill="#9d1226"/>
+  <g fill="none" stroke="#fff2f4" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
     <!-- basket body -->
     <path d="M136 212 h240 l-26 176 a24 24 0 0 1 -24 20 H186 a24 24 0 0 1 -24 -20 Z"/>
     <!-- handle -->

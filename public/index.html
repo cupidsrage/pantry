@@ -5,56 +5,148 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Pantry &amp; List</title>
 <link rel="manifest" href="/manifest.webmanifest" />
-<meta name="theme-color" content="#059669" />
+<meta name="theme-color" content="#7d0d1e" />
 <link rel="icon" href="/icon.svg" type="image/svg+xml" />
 <link rel="apple-touch-icon" href="/icon-180.png" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Pantry" />
 <style>
+  /* Every colour in this file goes through one of these tokens, so a theme is
+     just a different block of values. Dracula is the default; "daylight" below
+     is the original palette, kept intact for anyone who wants it back. */
+  :root {
+    --bg: #0a0608;
+    --bg-glow: radial-gradient(1100px 520px at 50% -180px, #3d0a17 0%, rgba(61,10,23,0) 70%);
+    --surface: #161014;
+    --surface-2: #241a20;
+    --raised: #2c1f27;
+    --border: #2e2129;
+    --border-strong: #402d37;
+    --text: #ece2e5;
+    --text-strong: #fdf7f8;
+    --text-2: #cbb6bd;
+    --muted: #9a838b;
+    --muted-2: #7b666d;
+    --chip-ink: #e2d2d7;
+    --ic-hover: #f0dfe3;
+    --btn-dark-bg: #3a2a32;
+    --btn-dark-hover: #4b3742;
+    --accent: #9d1226;          /* blood crimson — primary fills */
+    --accent-hover: #7d0d1e;
+    --accent-ink: #e8607f;      /* the same idea, legible as small text */
+    --accent-soft: #260f15;
+    --accent-soft-border: #6e1a2a;
+    --focus: #e0405c;
+    --sky: #6d4bb5;             /* candle-lit violet — secondary actions */
+    --sky-hover: #57389a;
+    --sky-ink: #a98bf0;
+    --info-soft: #191428;
+    --danger: #ff5f56;
+    --danger-ink: #ff4d4d;
+    --warn-ink: #e7a83c;
+    --on-accent: #fff2f4;
+    --toast-bg: #1b1116;
+    --tabs-bg: rgba(255,255,255,.06);
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.5);
+    --display: Georgia, "Iowan Old Style", "Times New Roman", serif;
+    --display-spacing: .01em;
+    --disabled-opacity: .55;
+    color-scheme: dark;
+  }
+  :root[data-theme="daylight"] {
+    --bg: #fafaf9;
+    --bg-glow: none;
+    --surface: #fff;
+    --surface-2: #f5f5f4;
+    --raised: #fff;
+    --border: #e7e5e4;
+    --border-strong: #d6d3d1;
+    --text: #292524;
+    --text-strong: #1c1917;
+    --text-2: #57534e;
+    --muted: #78716c;
+    --muted-2: #a8a29e;
+    --chip-ink: #44403c;
+    --ic-hover: #44403c;
+    --btn-dark-bg: #44403c;
+    --btn-dark-hover: #292524;
+    --accent: #059669;
+    --accent-hover: #047857;
+    --accent-ink: #059669;
+    --accent-soft: #ecfdf5;
+    --accent-soft-border: #a7f3d0;
+    --focus: #34d399;
+    --sky: #0284c7;
+    --sky-hover: #0369a1;
+    --sky-ink: #0284c7;
+    --info-soft: #eff6ff;
+    --danger: #ef4444;
+    --danger-ink: #dc2626;
+    --warn-ink: #d97706;
+    --on-accent: #fff;
+    --toast-bg: #1c1917;
+    --tabs-bg: rgba(214,211,209,.4);
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.06);
+    --display: inherit;
+    --display-spacing: -.02em;
+    --disabled-opacity: .4;
+    color-scheme: light;
+  }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: ui-sans-serif, system-ui, sans-serif; background: #fafaf9; color: #292524; }
+  body { font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text);
+         background-image: var(--bg-glow); background-attachment: fixed; background-repeat: no-repeat; min-height: 100vh; }
   .wrap { max-width: 640px; margin: 0 auto; padding: 24px 16px; }
-  h1 { font-size: 22px; letter-spacing: -.02em; }
-  .sub { font-size: 14px; color: #78716c; margin: 2px 0 20px; }
-  .tabs { display: flex; gap: 4px; background: rgba(214,211,209,.4); padding: 4px; border-radius: 12px; margin-bottom: 20px; }
-  .tab { flex: 1; border: 0; background: none; padding: 8px; border-radius: 8px; font-size: 14px; font-weight: 500; color: #78716c; cursor: pointer; }
-  .tab.active { background: #fff; color: #1c1917; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
-  textarea { width: 100%; height: 176px; padding: 12px; border: 1px solid #d6d3d1; border-radius: 12px; font-size: 14px; resize: none; font-family: inherit; }
-  textarea:focus, input:focus { outline: 2px solid #34d399; }
-  .btn { border: 0; border-radius: 12px; padding: 10px; font-size: 14px; font-weight: 500; color: #fff; cursor: pointer; width: 100%; }
-  .btn-green { background: #059669; } .btn-green:hover { background: #047857; }
-  .btn-dark { background: #44403c; } .btn-dark:hover { background: #292524; }
-  .btn-sky { background: #0284c7; } .btn-sky:hover { background: #0369a1; }
-  .btn:disabled { opacity: .4; cursor: default; }
-  .row { display: flex; align-items: center; gap: 8px; padding: 10px; border: 1px solid #e7e5e4; background: #fff; border-radius: 12px; margin-bottom: 8px; }
-  .row.checked { border-color: #a7f3d0; background: #ecfdf5; }
+  h1 { font-size: 22px; letter-spacing: var(--display-spacing); font-family: var(--display); }
+  .head { display: flex; align-items: center; gap: 10px; }
+  .theme-btn { margin-left: auto; border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+               border-radius: 10px; padding: 5px 9px; font-size: 14px; line-height: 1; cursor: pointer; }
+  .theme-btn:hover { border-color: var(--accent-soft-border); }
+  /* Inputs have no background of their own, so they'd stay white on the dark theme. */
+  textarea, input, select { background: var(--surface); color: var(--text); }
+  ::placeholder { color: var(--muted-2); }
+  .sub { font-size: 14px; color: var(--muted); margin: 2px 0 20px; }
+  .tabs { display: flex; gap: 4px; background: var(--tabs-bg); padding: 4px; border-radius: 12px; margin-bottom: 20px; }
+  .tab { flex: 1; border: 0; background: none; padding: 8px; border-radius: 8px; font-size: 14px; font-weight: 500; color: var(--muted); cursor: pointer; }
+  .tab.active { background: var(--raised); color: var(--text-strong); box-shadow: var(--shadow-sm); }
+  textarea { width: 100%; height: 176px; padding: 12px; border: 1px solid var(--border-strong); border-radius: 12px; font-size: 14px; resize: none; font-family: inherit; }
+  textarea:focus, input:focus { outline: 2px solid var(--focus); }
+  .btn { border: 0; border-radius: 12px; padding: 10px; font-size: 14px; font-weight: 500; color: var(--on-accent); cursor: pointer; width: 100%; }
+  .btn-green { background: var(--accent); } .btn-green:hover { background: var(--accent-hover); }
+  .btn-dark { background: var(--btn-dark-bg); } .btn-dark:hover { background: var(--btn-dark-hover); }
+  .btn-sky { background: var(--sky); } .btn-sky:hover { background: var(--sky-hover); }
+  .btn:disabled { opacity: var(--disabled-opacity); cursor: default; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 10px; border: 1px solid var(--border); background: var(--surface); border-radius: 12px; margin-bottom: 8px; }
+  .row.checked { border-color: var(--accent-soft-border); background: var(--accent-soft); }
   .name { font-size: 14px; text-transform: capitalize; }
-  .name.done { text-decoration: line-through; color: #a8a29e; }
-  .meta { font-size: 12px; color: #78716c; }
-  .qty { font-size: 12px; color: #57534e; min-width: 40px; text-align: center; }
-  .ic { border: 0; background: none; cursor: pointer; color: #a8a29e; padding: 4px; font-size: 15px; line-height: 1; }
-  .ic:hover { color: #44403c; }
-  .ic.del:hover { color: #ef4444; } .ic.link { color: #0284c7; text-decoration: none; }
-  .check { width: 24px; height: 24px; border: 1px solid #d6d3d1; border-radius: 6px; background: none; cursor: pointer; color: #fff; }
-  .check.on { background: #059669; border-color: #059669; }
-  .empty { text-align: center; color: #a8a29e; font-size: 14px; padding: 40px 0; }
-  .parsed { border: 1px solid #e7e5e4; border-radius: 12px; overflow: hidden; margin-top: 16px; }
-  .parsed-head { padding: 8px 12px; background: #f5f5f4; font-size: 12px; font-weight: 600; color: #78716c; text-transform: uppercase; }
-  .pitem { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-top: 1px solid #f5f5f4; font-size: 14px; }
-  .stock { font-size: 12px; color: #059669; font-weight: 500; }
+  .name.done { text-decoration: line-through; color: var(--muted-2); }
+  .meta { font-size: 12px; color: var(--muted); }
+  .qty { font-size: 12px; color: var(--text-2); min-width: 40px; text-align: center; }
+  .ic { border: 0; background: none; cursor: pointer; color: var(--muted-2); padding: 4px; font-size: 15px; line-height: 1; }
+  .ic:hover { color: var(--ic-hover); }
+  .ic.del:hover { color: var(--danger); } .ic.link { color: var(--sky-ink); text-decoration: none; }
+  .check { width: 24px; height: 24px; border: 1px solid var(--border-strong); border-radius: 6px; background: none; cursor: pointer; color: var(--on-accent); }
+  .check.on { background: var(--accent); border-color: var(--accent); }
+  .empty { text-align: center; color: var(--muted-2); font-size: 14px; padding: 40px 0; }
+  .parsed { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin-top: 16px; }
+  .parsed-head { padding: 8px 12px; background: var(--surface-2); font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; }
+  .pitem { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-top: 1px solid var(--surface-2); font-size: 14px; }
+  .stock { font-size: 12px; color: var(--accent-ink); font-weight: 500; }
   .addbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
-  .addbar input { padding: 8px 12px; border: 1px solid #d6d3d1; border-radius: 8px; font-size: 14px; }
+  .addbar input { padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: 8px; font-size: 14px; }
   .actions { display: flex; gap: 8px; margin-top: 8px; }
-  .err { color: #dc2626; font-size: 14px; margin-top: 8px; }
+  .err { color: var(--danger-ink); font-size: 14px; margin-top: 8px; }
   .mt { margin-top: 12px; }
-  .bar { height: 5px; background: #e7e5e4; border-radius: 3px; overflow: hidden; width: 64px; }
-  .bar > i { display: block; height: 100%; background: #059669; }
+  .bar { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; width: 64px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>Pantry &amp; List</h1>
+  <div class="head">
+    <h1>Pantry &amp; List</h1>
+    <button id="themeBtn" class="theme-btn" title="Switch theme" aria-label="Switch theme">🦇</button>
+  </div>
 
   <!-- Login / signup screen (shown until authenticated) -->
   <div id="auth" style="display:none"></div>
@@ -63,7 +155,7 @@
   <div id="app" style="display:none">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
       <p class="sub" style="margin:0">Paste a recipe, build your list, track what's in stock.</p>
-      <button id="logout" class="ic" style="font-size:12px;color:#78716c;border:1px solid #e7e5e4;border-radius:8px;padding:4px 10px;white-space:nowrap">Log out</button>
+      <button id="logout" class="ic" style="font-size:12px;color:var(--muted);border:1px solid var(--border);border-radius:8px;padding:4px 10px;white-space:nowrap">Log out</button>
     </div>
     <div class="tabs">
       <button class="tab active" data-tab="recipe">Recipe</button>
@@ -302,7 +394,7 @@ function plannerForm() {
     <label style="flex:${wide ? "1 1 100%" : "1 1 44%"};min-width:0">
       <span class="meta" style="display:block;margin-bottom:3px">${label}</span>
       <input data-pc="${key}" value="${esc(c[key])}" placeholder="${ph}" ${wide ? "" : 'inputmode="numeric"'}
-        style="width:100%;padding:7px 9px;border:1px solid #d6d3d1;border-radius:8px;font-size:14px" />
+        style="width:100%;padding:7px 9px;border:1px solid var(--border-strong);border-radius:8px;font-size:14px" />
     </label>`;
   return `
     <div style="padding:12px">
@@ -325,7 +417,7 @@ function plannerReview() {
   const s = p.summary;
   const dayRow = (m) => {
     const d = new Date(m.date + "T00:00:00");
-    return `<div style="display:flex;gap:10px;padding:7px 0;border-top:1px solid #f5f5f4">
+    return `<div style="display:flex;gap:10px;padding:7px 0;border-top:1px solid var(--surface-2)">
       <span style="flex:none;width:46px;font-weight:600;font-size:13px">${DOW[d.getDay()]} ${d.getDate()}</span>
       <span style="flex:1;min-width:0">
         <span style="font-size:13px;font-weight:500;text-transform:capitalize">${esc(m.title)}</span>
@@ -341,7 +433,7 @@ function plannerReview() {
   return `
     <div style="padding:12px">
       ${p.note ? `<p class="meta" style="margin-bottom:8px">${esc(p.note)}</p>` : ""}
-      <div style="display:flex;gap:6px;padding:8px 0;background:#fafaf9;border-radius:8px;margin-bottom:6px">
+      <div style="display:flex;gap:6px;padding:8px 0;background:var(--bg);border-radius:8px;margin-bottom:6px">
         ${stat(s.meals, "meals")}
         ${stat(minutesToText(s.minutes) || "—", "cooking")}
         ${stat(s.caloriesPerDay == null ? "—" : s.caloriesPerDay, "kcal/day")}
@@ -349,12 +441,12 @@ function plannerReview() {
       </div>
       ${p.meals.map(dayRow).join("")}
       ${p.empty.length ? `<p class="meta" style="margin-top:8px">Left open: ${p.empty.map(d => DOW[new Date(d + "T00:00:00").getDay()]).join(", ")}</p>` : ""}
-      ${p.dropped.length ? `<p class="meta" style="margin-top:6px;color:#d97706">Skipped ${p.dropped.length} suggestion${p.dropped.length > 1 ? "s" : ""} that didn't check out.</p>` : ""}
+      ${p.dropped.length ? `<p class="meta" style="margin-top:6px;color:var(--warn-ink)">Skipped ${p.dropped.length} suggestion${p.dropped.length > 1 ? "s" : ""} that didn't check out.</p>` : ""}
 
-      <div style="margin-top:12px;padding-top:10px;border-top:1px solid #f5f5f4">
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--surface-2)">
         <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer">
           <input type="checkbox" id="planAddList" ${planner.addToList ? "checked" : ""}
-            style="accent-color:#059669;width:16px;height:16px;flex:none;margin-top:2px" />
+            style="accent-color:var(--accent);width:16px;height:16px;flex:none;margin-top:2px" />
           <span style="font-size:13px">Add the ${p.shopping.length} missing item${p.shopping.length === 1 ? "" : "s"} to my list
             ${p.cost.total > 0 ? `<br><span class="meta">about $${p.cost.total.toFixed(2)}${p.cost.unknown.length ? ` + ${p.cost.unknown.length} never bought before` : ""}</span>` : ""}
           </span>
@@ -367,7 +459,7 @@ function plannerReview() {
         <button class="btn btn-green" id="planApply" ${planner.busy ? "disabled" : ""} style="flex:2">
           ${planner.busy ? "Saving…" : "Use this week"}</button>
         <button class="btn" id="planRetry" ${planner.busy ? "disabled" : ""}
-          style="flex:1;background:#e7e5e4;color:#44403c">Try again</button>
+          style="flex:1;background:var(--border);color:var(--chip-ink)">Try again</button>
       </div>
       <p class="meta" style="font-size:11px;text-align:center;margin-top:8px">Replaces anything already planned this week.</p>
       ${planner.error ? `<p class="err">${esc(planner.error)}</p>` : ""}
@@ -391,7 +483,7 @@ function pushToggleRow() {
   if (!push.enabled || !pushSupported()) return "";
   const on = push.subscribed;
   return `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;
-      border:1px solid ${on ? "#a7f3d0" : "#e7e5e4"};background:${on ? "#ecfdf5" : "#fff"};
+      border:1px solid ${on ? "var(--accent-soft-border)" : "var(--border)"};background:${on ? "var(--accent-soft)" : "var(--surface)"};
       border-radius:12px;padding:9px 12px;margin-bottom:12px">
       <span style="font-size:13px;font-weight:600">🔔 Cook &amp; thaw reminders<br>
         <span class="meta" style="font-weight:400">${on ? "on for this device" : "get a nudge when it's time to start or thaw"}</span></span>
@@ -421,18 +513,18 @@ function recipePicker() {
 
   const rows = recipeRows(saved, planSort, planSearch);
   const seg = (k, label) =>
-    `<button data-plansort="${k}" style="flex:1;border:0;padding:6px 2px;border-radius:7px;font-size:11px;font-weight:500;cursor:pointer;${planSort === k ? "background:#fff;color:#1c1917;box-shadow:0 1px 2px rgba(0,0,0,.06)" : "background:none;color:#78716c"}">${label}</button>`;
+    `<button data-plansort="${k}" style="flex:1;border:0;padding:6px 2px;border-radius:7px;font-size:11px;font-weight:500;cursor:pointer;${planSort === k ? "background:var(--raised);color:var(--text-strong);box-shadow:var(--shadow-sm)" : "background:none;color:var(--muted)"}">${label}</button>`;
 
   const picks = rows.map(({ r, cov, soon, via }) => {
     const on = String(r.id) === String(planAddRecipe);
     const makeable = cov.total > 0 && cov.have === cov.total;
     const badge = makeable
-      ? `<span style="color:#059669;font-weight:600">✓ can make</span>`
+      ? `<span style="color:var(--accent-ink);font-weight:600">✓ can make</span>`
       : `<span>${cov.have}/${cov.total} on hand</span>`;
     return `<button data-planpick="${r.id}" style="display:block;width:100%;text-align:left;cursor:pointer;
-        border:1px solid ${on ? "#059669" : "#e7e5e4"};background:${on ? "#ecfdf5" : "#fff"};
+        border:1px solid ${on ? "var(--accent-ink)" : "var(--border)"};background:${on ? "var(--accent-soft)" : "var(--surface)"};
         border-radius:8px;padding:7px 9px;margin-bottom:4px">
-      <span style="font-size:13px;font-weight:${on ? "600" : "500"};color:#1c1917;text-transform:capitalize">${on ? "✓ " : ""}${esc(r.title)}</span><br>
+      <span style="font-size:13px;font-weight:${on ? "600" : "500"};color:var(--text-strong);text-transform:capitalize">${on ? "✓ " : ""}${esc(r.title)}</span><br>
       <span class="meta" style="font-size:11px">${badge}${planSort === "expiring" ? soonTagHtml(soon) : ""}${via ? ` · has ${esc(via)}` : ""}</span>
     </button>`;
   }).join("");
@@ -441,11 +533,11 @@ function recipePicker() {
     <div style="position:relative;display:flex;align-items:center;margin-bottom:6px">
       <input id="planSearch" value="${esc(planSearch)}" placeholder="Search recipes or ingredients…"
         autocapitalize="none" autocorrect="off"
-        style="width:100%;padding:8px 30px 8px 10px;border:1px solid #d6d3d1;border-radius:8px;font-size:14px" />
+        style="width:100%;padding:8px 30px 8px 10px;border:1px solid var(--border-strong);border-radius:8px;font-size:14px" />
       ${planSearch ? `<button id="planSearchClear" title="Clear search"
-        style="position:absolute;right:6px;border:0;background:#e7e5e4;color:#57534e;width:20px;height:20px;border-radius:50%;cursor:pointer;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center">✕</button>` : ""}
+        style="position:absolute;right:6px;border:0;background:var(--border);color:var(--text-2);width:20px;height:20px;border-radius:50%;cursor:pointer;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center">✕</button>` : ""}
     </div>
-    <div style="display:flex;gap:3px;background:rgba(214,211,209,.45);padding:3px;border-radius:9px;margin-bottom:6px">
+    <div style="display:flex;gap:3px;background:var(--tabs-bg);padding:3px;border-radius:9px;margin-bottom:6px">
       ${seg("recent", "Recent")}${seg("az", "A–Z")}${seg("canmake", "Can make")}${seg("expiring", "Use soon")}
     </div>
     <div id="planPickList" style="max-height:190px;overflow-y:auto;-webkit-overflow-scrolling:touch">
@@ -462,9 +554,9 @@ function planView() {
   const label = `${MON[ws.getMonth()]} ${ws.getDate()} – ${MON[we.getMonth()]} ${we.getDate()}`;
   let html = pushToggleRow() + `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-      <button class="ic" id="planPrev" style="border:1px solid #d6d3d1;border-radius:8px;padding:4px 10px">←</button>
+      <button class="ic" id="planPrev" style="border:1px solid var(--border-strong);border-radius:8px;padding:4px 10px">←</button>
       <span style="font-weight:600;font-size:15px">${label}</span>
-      <button class="ic" id="planNext" style="border:1px solid #d6d3d1;border-radius:8px;padding:4px 10px">→</button>
+      <button class="ic" id="planNext" style="border:1px solid var(--border-strong);border-radius:8px;padding:4px 10px">→</button>
     </div>`;
   if (saved.length >= 3 && !planner)
     html += `<button class="btn btn-sky" id="planOpen" style="margin-bottom:12px">✨ Plan my week</button>`;
@@ -477,22 +569,22 @@ function planView() {
     const dY = ymd(day);
     const isToday = dY === todayY;
     const dayMeals = meals.filter(m => m.date === dY);
-    html += `<div style="border:1px solid ${isToday ? "#059669" : "#e7e5e4"};border-radius:12px;padding:10px 12px;margin-bottom:8px">
+    html += `<div style="border:1px solid ${isToday ? "var(--accent-ink)" : "var(--border)"};border-radius:12px;padding:10px 12px;margin-bottom:8px">
       <div style="display:flex;justify-content:space-between;align-items:center">
-        <span style="font-weight:600;font-size:14px">${DOW[day.getDay()]} ${day.getDate()}${isToday ? ` <span style="color:#059669;font-size:11px">• today</span>` : ""}</span>
-        <button class="ic" data-planadd="${dY}" style="border:1px solid #d6d3d1;border-radius:8px;padding:2px 10px;font-size:13px">+ meal</button>
+        <span style="font-weight:600;font-size:14px">${DOW[day.getDay()]} ${day.getDate()}${isToday ? ` <span style="color:var(--accent-ink);font-size:11px">• today</span>` : ""}</span>
+        <button class="ic" data-planadd="${dY}" style="border:1px solid var(--border-strong);border-radius:8px;padding:2px 10px;font-size:13px">+ meal</button>
       </div>`;
 
     for (const m of dayMeals) {
       const rem = mealReminders(m);
-      html += `<div style="margin-top:8px;padding:8px;background:#fafaf9;border-radius:8px">
+      html += `<div style="margin-top:8px;padding:8px;background:var(--bg);border-radius:8px">
         <div style="display:flex;justify-content:space-between;align-items:start;gap:8px">
           <div style="flex:1">
             <span style="font-weight:600;font-size:14px">${esc(m.title)}</span>
             ${m.meal_time ? `<span class="meta"> · eat ${fmtTime(m.meal_time)}</span>` : ""}
             ${m.recipe && (m.recipe.prep_min || m.recipe.cook_min) ? `<br><span class="meta">${m.recipe.prep_min ? `prep ${minutesToText(m.recipe.prep_min)}` : ""}${m.recipe.prep_min && m.recipe.cook_min ? " · " : ""}${m.recipe.cook_min ? `cook ${minutesToText(m.recipe.cook_min)}` : ""}</span>` : ""}
-            ${rem.start ? `<br><span class="meta" style="color:#0284c7;font-weight:600">▶ start cooking ~${rem.start}</span>` : ""}
-            ${rem.thaw.length ? `<br><span class="meta" style="color:#d97706;font-weight:600">❄ thaw ahead: ${rem.thaw.join(", ")}</span>` : ""}
+            ${rem.start ? `<br><span class="meta" style="color:var(--sky-ink);font-weight:600">▶ start cooking ~${rem.start}</span>` : ""}
+            ${rem.thaw.length ? `<br><span class="meta" style="color:var(--warn-ink);font-weight:600">❄ thaw ahead: ${rem.thaw.join(", ")}</span>` : ""}
           </div>
           <button class="ic del" data-mealdel="${m.id}" style="flex:none">🗑</button>
         </div>
@@ -501,11 +593,11 @@ function planView() {
     }
 
     if (planAddDay === dY) {
-      html += `<div style="margin-top:8px;padding:8px;background:#eff6ff;border-radius:8px">
+      html += `<div style="margin-top:8px;padding:8px;background:var(--info-soft);border-radius:8px">
         ${recipePicker()}
         <div style="display:flex;gap:6px;align-items:center;margin:8px 0 6px">
           <span class="meta">eat at</span>
-          <input id="planTime" type="time" value="${planAddTime}" style="padding:6px;border:1px solid #d6d3d1;border-radius:8px;font-size:14px" />
+          <input id="planTime" type="time" value="${planAddTime}" style="padding:6px;border:1px solid var(--border-strong);border-radius:8px;font-size:14px" />
         </div>
         <div style="display:flex;gap:6px">
           <button class="btn btn-green" id="planSave" style="flex:1">Add to ${DOW[day.getDay()]}</button>
@@ -533,7 +625,7 @@ let photoImages = [];         // multiple pages: [{base64, mediaType, dataUrl}]
 let savedSort = "recent";     // "recent" | "az" | "canmake" | "expiring"
 let savedSearch = "";         // Saved tab search box text
 let showPhotos = false;       // detail view: original photos expanded
-let shareOpen = false, shareMsg = "", shareMsgTone = "#059669";
+let shareOpen = false, shareMsg = "", shareMsgTone = "var(--accent-ink)";
 let meals = [];               // planned meals for the visible week
 let planWeekStart = null;     // Date (local) of the Sunday starting the shown week
 let planAddDay = null;        // 'YYYY-MM-DD' of the day whose add-form is open
@@ -639,16 +731,16 @@ function lightboxHtml() {
 
 function recipeView() {
   const seg = (m, label) =>
-    `<button class="segbtn ${recipeMode === m ? "active" : ""}" data-mode="${m}" style="flex:1;border:0;background:none;padding:8px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;${recipeMode === m ? "background:#fff;color:#1c1917;box-shadow:0 1px 2px rgba(0,0,0,.06)" : "color:#78716c"}">${label}</button>`;
+    `<button class="segbtn ${recipeMode === m ? "active" : ""}" data-mode="${m}" style="flex:1;border:0;background:none;padding:8px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;${recipeMode === m ? "background:var(--raised);color:var(--text-strong);box-shadow:var(--shadow-sm)" : "color:var(--muted)"}">${label}</button>`;
   let html = `
-    <div style="display:flex;gap:4px;background:rgba(214,211,209,.4);padding:4px;border-radius:12px;margin-bottom:16px">
+    <div style="display:flex;gap:4px;background:var(--tabs-bg);padding:4px;border-radius:12px;margin-bottom:16px">
       ${seg("import", "Link / paste")}${seg("manual", "Type it in")}${seg("photo", "Photo")}
     </div>`;
 
   if (recipeMode === "manual") {
     html += `
       <input id="mName" placeholder="Recipe name" value="${esc(manualName)}"
-        style="width:100%;padding:10px 12px;border:1px solid #d6d3d1;border-radius:10px;font-size:15px;margin-bottom:10px" />
+        style="width:100%;padding:10px 12px;border:1px solid var(--border-strong);border-radius:10px;font-size:15px;margin-bottom:10px" />
       <div class="meta" style="font-weight:600;margin-bottom:4px">INGREDIENTS — one per line</div>
       <textarea id="mIng" placeholder="2 cloves garlic&#10;1 cup flour&#10;4 large potatoes&#10;1/2 lb bacon"
         style="height:130px;margin-bottom:12px">${esc(manualIngredients)}</textarea>
@@ -665,18 +757,18 @@ function recipeView() {
   if (recipeMode === "photo") {
     const thumbs = photoImages.map((im, i) => `
       <div style="position:relative;display:inline-block;margin:4px">
-        <img src="${im.dataUrl}" style="width:70px;height:70px;object-fit:cover;border-radius:8px;border:1px solid #d6d3d1" />
+        <img src="${im.dataUrl}" style="width:70px;height:70px;object-fit:cover;border-radius:8px;border:1px solid var(--border-strong)" />
         <button class="ic del" data-photodel="${i}" title="remove"
-          style="position:absolute;top:-8px;right:-8px;background:#fff;border:1px solid #d6d3d1;border-radius:50%;width:20px;height:20px;font-size:11px;line-height:1">✕</button>
+          style="position:absolute;top:-8px;right:-8px;background:var(--surface);border:1px solid var(--border-strong);border-radius:50%;width:20px;height:20px;font-size:11px;line-height:1">✕</button>
         <span style="position:absolute;bottom:2px;left:2px;background:rgba(0,0,0,.6);color:#fff;font-size:10px;padding:1px 4px;border-radius:4px">${i + 1}</span>
       </div>`).join("");
     html += `
-      <div style="border:2px dashed #d6d3d1;border-radius:14px;padding:22px 16px;text-align:center;margin-bottom:12px">
+      <div style="border:2px dashed var(--border-strong);border-radius:14px;padding:22px 16px;text-align:center;margin-bottom:12px">
         <p class="meta" style="margin-bottom:14px">Photograph a recipe card — handwritten or printed — or pick a PDF. Add more than one photo for a multi-page recipe.</p>
         <input id="photoInput" type="file" accept="image/*,application/pdf" style="display:none" />
         ${thumbs ? `<div style="margin-bottom:12px">${thumbs}</div>` : ""}
         <button class="btn" id="photoPick" ${parsing ? "disabled" : ""}
-          style="max-width:260px;margin:0 auto 8px;background:#e7e5e4;color:#44403c">
+          style="max-width:260px;margin:0 auto 8px;background:var(--border);color:var(--chip-ink)">
           ${photoImages.length ? "+ Add another page" : "📷 Photo or PDF"}</button>
         ${photoImages.length ? `<button class="btn btn-green" id="photoRead" ${parsing ? "disabled" : ""} style="max-width:260px;margin:0 auto">
           ${parsing ? "Reading…" : `Read ${photoImages.length} page${photoImages.length > 1 ? "s" : ""}`}</button>` : ""}
@@ -690,9 +782,9 @@ function recipeView() {
     <div style="display:flex;gap:8px;margin-bottom:10px">
       <div style="flex:1;position:relative;display:flex;align-items:center">
         <input id="url" placeholder="Paste a recipe link (https://…)" value="${esc(recipeUrl)}"
-          style="width:100%;padding:10px 34px 10px 12px;border:1px solid #d6d3d1;border-radius:10px;font-size:14px" />
+          style="width:100%;padding:10px 34px 10px 12px;border:1px solid var(--border-strong);border-radius:10px;font-size:14px" />
         ${recipeUrl ? `<button id="urlClear" title="Clear link"
-          style="position:absolute;right:6px;border:0;background:#e7e5e4;color:#57534e;width:22px;height:22px;border-radius:50%;cursor:pointer;font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center">✕</button>` : ""}
+          style="position:absolute;right:6px;border:0;background:var(--border);color:var(--text-2);width:22px;height:22px;border-radius:50%;cursor:pointer;font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center">✕</button>` : ""}
       </div>
       <button class="btn btn-dark" id="fromUrl" style="width:auto;padding:0 16px" ${parsing ? "disabled" : ""}>Fetch</button>
     </div>
@@ -705,7 +797,7 @@ function recipeView() {
     html += `<div class="parsed">
       <div class="parsed-head" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
         <input id="pTitle" value="${esc(parsedTitle || "")}" placeholder="Recipe name"
-          style="flex:1;border:1px solid #d6d3d1;border-radius:8px;padding:6px 8px;font-size:13px;font-weight:600" />
+          style="flex:1;border:1px solid var(--border-strong);border-radius:8px;padding:6px 8px;font-size:13px;font-weight:600" />
         <button class="btn btn-sky" id="save" style="width:auto;padding:5px 12px;font-size:12px">Save</button>
       </div>
       <div class="meta" style="padding:8px 12px 0;font-weight:600">INGREDIENTS — edit, remove, or add below</div>`;
@@ -714,33 +806,33 @@ function recipeView() {
       const haveBase = batches.reduce((s, x) => s + x.base, 0);
       const have = batches[0];
       html += `<div class="pitem" style="gap:6px;align-items:center">
-        <input type="checkbox" data-use="${i}" ${p.use ? "checked" : ""} style="accent-color:#059669;width:16px;height:16px;flex:none" />
+        <input type="checkbox" data-use="${i}" ${p.use ? "checked" : ""} style="accent-color:var(--accent);width:16px;height:16px;flex:none" />
         <input data-ename="${i}" value="${esc(p.name || "")}" placeholder="ingredient"
-          style="flex:2;min-width:80px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 7px;font-size:13px" />
+          style="flex:2;min-width:80px;border:1px solid var(--border);border-radius:6px;padding:5px 7px;font-size:13px" />
         <input data-eqty="${i}" value="${esc(p.use_qty ?? "")}" inputmode="decimal" placeholder="qty"
-          style="width:46px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 4px;font-size:13px;text-align:center" />
+          style="width:46px;border:1px solid var(--border);border-radius:6px;padding:5px 4px;font-size:13px;text-align:center" />
         <input data-eunit="${i}" value="${esc(p.use_unit || "")}" placeholder="unit"
-          style="width:60px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 4px;font-size:13px" />
+          style="width:60px;border:1px solid var(--border);border-radius:6px;padding:5px 4px;font-size:13px" />
         <button class="ic del" data-edel="${i}" title="remove" style="flex:none">🗑</button>
       </div>
-      ${have ? `<div class="meta" style="padding:0 12px 4px 40px;color:#059669">have ${showBase(haveBase, have.base_unit)} in stock</div>` : ""}`;
+      ${have ? `<div class="meta" style="padding:0 12px 4px 40px;color:var(--accent-ink)">have ${showBase(haveBase, have.base_unit)} in stock</div>` : ""}`;
     });
     html += `<div style="padding:8px 12px">
-      <button class="btn" id="addIng" style="width:auto;padding:6px 12px;font-size:13px;background:#e7e5e4;color:#44403c">+ Add ingredient</button>
+      <button class="btn" id="addIng" style="width:auto;padding:6px 12px;font-size:13px;background:var(--border);color:var(--chip-ink)">+ Add ingredient</button>
     </div>`;
     if (parsedSteps.length)
-      html += `<div style="padding:10px 12px;border-top:1px solid #f5f5f4">
+      html += `<div style="padding:10px 12px;border-top:1px solid var(--surface-2)">
         <div class="meta" style="font-weight:600;margin-bottom:6px">STEPS</div>
         <ol style="padding-left:18px;font-size:14px;line-height:1.5">${parsedSteps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>
       </div>`;
     if (parsedPrep || parsedCook)
-      html += `<div style="display:flex;gap:16px;padding:8px 12px;border-top:1px solid #f5f5f4">
+      html += `<div style="display:flex;gap:16px;padding:8px 12px;border-top:1px solid var(--surface-2)">
         ${parsedPrep ? `<span class="meta">🔪 prep ${minutesToText(parsedPrep)}</span>` : ""}
         ${parsedCook ? `<span class="meta">🔥 cook ${minutesToText(parsedCook)}</span>` : ""}
         <span class="meta" style="font-weight:600">total ${minutesToText((parsedPrep || 0) + (parsedCook || 0))}</span>
       </div>`;
     html += nutritionBlock(parsedNutrition);
-    html += `<div style="padding:12px;background:#fafaf9;border-top:1px solid #f5f5f4">
+    html += `<div style="padding:12px;background:var(--bg);border-top:1px solid var(--surface-2)">
       <div class="actions" style="margin-top:0">
         <button class="btn btn-green" id="toList">Add needed → List</button>
         <button class="btn btn-sky" id="toListAll">Add all → List</button>
@@ -778,7 +870,7 @@ function recipeRows(recipes, mode, query) {
 // "uses 2d stock" / "uses expired" — only meaningful in the "Use soon" ordering.
 function soonTagHtml(soon) {
   if (!isFinite(soon)) return "";
-  const color = soon < 0 ? "#dc2626" : soon <= 3 ? "#d97706" : "#78716c";
+  const color = soon < 0 ? "var(--danger-ink)" : soon <= 3 ? "var(--warn-ink)" : "var(--muted)";
   const text = soon < 0 ? "uses expired" : soon === 0 ? "uses today's" : `uses ${soon}d stock`;
   return `<span style="font-size:11px;font-weight:600;color:${color};margin-left:6px">${text}</span>`;
 }
@@ -788,16 +880,16 @@ function savedView() {
   if (!saved.length) return `<p class="empty">No saved recipes yet. Parse one on the Recipe tab and tap “Save”.</p>`;
 
   const seg = (k, label) =>
-    `<button data-sort="${k}" style="flex:1;border:0;padding:8px 4px;border-radius:8px;font-size:12px;font-weight:500;cursor:pointer;${savedSort === k ? "background:#fff;color:#1c1917;box-shadow:0 1px 2px rgba(0,0,0,.06)" : "background:none;color:#78716c"}">${label}</button>`;
+    `<button data-sort="${k}" style="flex:1;border:0;padding:8px 4px;border-radius:8px;font-size:12px;font-weight:500;cursor:pointer;${savedSort === k ? "background:var(--raised);color:var(--text-strong);box-shadow:var(--shadow-sm)" : "background:none;color:var(--muted)"}">${label}</button>`;
   let html = `
     <div style="position:relative;display:flex;align-items:center;margin-bottom:8px">
       <input id="savedSearch" value="${esc(savedSearch)}" placeholder="Search recipes or ingredients…"
         autocapitalize="none" autocorrect="off"
-        style="width:100%;padding:9px 32px 9px 12px;border:1px solid #d6d3d1;border-radius:10px;font-size:14px" />
+        style="width:100%;padding:9px 32px 9px 12px;border:1px solid var(--border-strong);border-radius:10px;font-size:14px" />
       ${savedSearch ? `<button id="savedSearchClear" title="Clear search"
-        style="position:absolute;right:7px;border:0;background:#e7e5e4;color:#57534e;width:22px;height:22px;border-radius:50%;cursor:pointer;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center">✕</button>` : ""}
+        style="position:absolute;right:7px;border:0;background:var(--border);color:var(--text-2);width:22px;height:22px;border-radius:50%;cursor:pointer;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center">✕</button>` : ""}
     </div>
-    <div style="display:flex;gap:4px;background:rgba(214,211,209,.4);padding:4px;border-radius:12px;margin-bottom:14px">
+    <div style="display:flex;gap:4px;background:var(--tabs-bg);padding:4px;border-radius:12px;margin-bottom:14px">
       ${seg("recent", "Recent")}${seg("az", "A–Z")}${seg("canmake", "Can make")}${seg("expiring", "Use soon")}
     </div>`;
 
@@ -811,7 +903,7 @@ function savedView() {
   html += rows.map(({ r, cov, soon, via }) => {
     const makeable = cov.total > 0 && cov.have === cov.total;
     const badge = makeable
-      ? `<span style="font-size:11px;font-weight:600;color:#059669;background:#ecfdf5;padding:2px 8px;border-radius:10px">✓ can make</span>`
+      ? `<span style="font-size:11px;font-weight:600;color:var(--accent-ink);background:var(--accent-soft);padding:2px 8px;border-radius:10px">✓ can make</span>`
       : `<span class="meta">${cov.have}/${cov.total} on hand</span>`;
     // in "Use soon" mode, show which uses aging stock
     const soonTag = savedSort === "expiring" ? soonTagHtml(soon) : "";
@@ -835,7 +927,7 @@ function nutritionBlock(n) {
        <div style="font-size:17px;font-weight:700">${Math.round(val)}${unit}</div>
        <div class="meta">${label}</div>
      </div>`;
-  return `<div style="padding:10px 12px;border-top:1px solid #f5f5f4">
+  return `<div style="padding:10px 12px;border-top:1px solid var(--surface-2)">
       <div class="meta" style="font-weight:600;margin-bottom:8px">PER SERVING${n.servings ? ` · makes ${n.servings}` : ""} <span style="font-weight:400">(estimated)</span></div>
       <div style="display:flex;gap:6px">
         ${cell("calories", n.calories, "")}${cell("protein", n.protein, "g")}${cell("carbs", n.carbs, "g")}${cell("fat", n.fat, "g")}
@@ -867,22 +959,22 @@ function recipeDetailView() {
           : photos.length
           ? (hasPdf
               ? `<a class="ic link" href="${photos[0]}" target="_blank" rel="noreferrer" style="font-size:12px">📄 source PDF ↗</a>`
-              : `<button class="ic link" id="togglePhotos" style="font-size:12px;border:0;background:none;cursor:pointer;color:#0284c7">📷 source ${showPhotos ? "▲" : `photo${photos.length > 1 ? "s" : ""} ▼`}</button>`)
+              : `<button class="ic link" id="togglePhotos" style="font-size:12px;border:0;background:none;cursor:pointer;color:var(--sky-ink)">📷 source ${showPhotos ? "▲" : `photo${photos.length > 1 ? "s" : ""} ▼`}</button>`)
           : ""}
       </div>
       ${(!hasPdf && photos.length && showPhotos)
-        ? `<div style="padding:10px 12px;border-bottom:1px solid #f5f5f4;display:flex;flex-wrap:wrap;gap:8px">
-            ${photos.map((p, pi) => `<img src="${p}" data-lightbox="${pi}" style="max-width:140px;max-height:180px;border-radius:8px;border:1px solid #e7e5e4;cursor:zoom-in" />`).join("")}
+        ? `<div style="padding:10px 12px;border-bottom:1px solid var(--surface-2);display:flex;flex-wrap:wrap;gap:8px">
+            ${photos.map((p, pi) => `<img src="${p}" data-lightbox="${pi}" style="max-width:140px;max-height:180px;border-radius:8px;border:1px solid var(--border);cursor:zoom-in" />`).join("")}
           </div>`
         : ""}
-      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid #f5f5f4">
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--surface-2)">
         <span class="meta" style="font-weight:600">SERVINGS ×</span>
-        <button class="ic" id="servDown" style="font-size:18px;border:1px solid #d6d3d1;border-radius:8px;width:30px">−</button>
+        <button class="ic" id="servDown" style="font-size:18px;border:1px solid var(--border-strong);border-radius:8px;width:30px">−</button>
         <span style="font-size:15px;min-width:28px;text-align:center;font-weight:600">${niceQty(servings)}</span>
-        <button class="ic" id="servUp" style="font-size:18px;border:1px solid #d6d3d1;border-radius:8px;width:30px">+</button>
+        <button class="ic" id="servUp" style="font-size:18px;border:1px solid var(--border-strong);border-radius:8px;width:30px">+</button>
         ${servings !== 1 ? `<span class="meta">amounts scaled</span>` : ""}
       </div>
-      ${(r.prep_min || r.cook_min) ? `<div style="display:flex;gap:16px;padding:8px 12px;border-bottom:1px solid #f5f5f4">
+      ${(r.prep_min || r.cook_min) ? `<div style="display:flex;gap:16px;padding:8px 12px;border-bottom:1px solid var(--surface-2)">
         ${r.prep_min ? `<span class="meta">🔪 prep ${minutesToText(r.prep_min)}</span>` : ""}
         ${r.cook_min ? `<span class="meta">🔥 cook ${minutesToText(r.cook_min)}</span>` : ""}
         <span class="meta" style="font-weight:600">total ${minutesToText((r.prep_min || 0) + (r.cook_min || 0))}</span>
@@ -897,15 +989,15 @@ function recipeDetailView() {
             const needBase = (i.use_base || 0) * servings;
             const haveBase = pantry.filter(x => norm(x.name) === norm(i.name)).reduce((s, x) => s + x.base, 0);
             let dot, note = "";
-            if (needBase <= 0) { dot = "#d6d3d1"; }            // no tracked requirement
-            else if (haveBase >= needBase) { dot = "#059669"; note = `<span style="color:#059669;font-size:12px;margin-left:6px">✓ have</span>`; }
+            if (needBase <= 0) { dot = "var(--border-strong)"; }            // no tracked requirement
+            else if (haveBase >= needBase) { dot = "var(--accent-ink)"; note = `<span style="color:var(--accent-ink);font-size:12px;margin-left:6px">✓ have</span>`; }
             else if (haveBase > 0) {                            // partial
-              dot = "#d97706";
+              dot = "var(--warn-ink)";
               const pct = Math.round((haveBase / needBase) * 100);
-              note = `<span style="color:#d97706;font-size:12px;margin-left:6px">partial · have ${showBase(haveBase, i.base_unit)} of ${showBase(needBase, i.base_unit)} (${pct}%)</span>`;
+              note = `<span style="color:var(--warn-ink);font-size:12px;margin-left:6px">partial · have ${showBase(haveBase, i.base_unit)} of ${showBase(needBase, i.base_unit)} (${pct}%)</span>`;
             } else {                                            // none
-              dot = "#a8a29e";
-              note = `<span style="color:#a8a29e;font-size:12px;margin-left:6px">need</span>`;
+              dot = "var(--muted-2)";
+              note = `<span style="color:var(--muted-2);font-size:12px;margin-left:6px">need</span>`;
             }
             return `<div style="display:flex;align-items:baseline;gap:8px;padding:3px 0">
               <span style="width:8px;height:8px;border-radius:50%;background:${dot};flex:none;transform:translateY(-1px)"></span>
@@ -914,7 +1006,7 @@ function recipeDetailView() {
           }).join("")}
         </div>
       </div>
-      ${r.steps.length ? `<div style="padding:10px 12px;border-top:1px solid #f5f5f4">
+      ${r.steps.length ? `<div style="padding:10px 12px;border-top:1px solid var(--surface-2)">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
           <span class="meta" style="font-weight:600">STEPS</span>
           <button class="btn btn-sky" id="startCook" style="width:auto;padding:5px 14px;font-size:12px">▶ Start cooking</button>
@@ -923,23 +1015,23 @@ function recipeDetailView() {
       </div>` : ""}
       ${nutritionBlock(r.nutrition)}
       ${err ? `<p class="err" style="padding:0 12px">${esc(err)}</p>` : ""}
-      <div style="padding:12px;background:#fafaf9;border-top:1px solid #f5f5f4">
+      <div style="padding:12px;background:var(--bg);border-top:1px solid var(--surface-2)">
         <div class="actions" style="margin-top:0">
           <button class="btn btn-green" id="rToList">Add needed → List</button>
           <button class="btn btn-sky" id="rToListAll">Add all → List</button>
         </div>
         <button class="btn btn-dark" id="rCook" style="margin-top:8px">Cooked it → subtract stock</button>
         ${shareOpen ? `
-          <div style="margin-top:10px;padding-top:10px;border-top:1px solid #e7e5e4">
+          <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
             <div class="meta" style="font-weight:600;margin-bottom:6px">Share this recipe with another account</div>
             <div style="display:flex;gap:8px">
               <input id="shareUser" placeholder="their username" autocapitalize="none" autocorrect="off"
-                style="flex:1;padding:9px 12px;border:1px solid #d6d3d1;border-radius:10px;font-size:14px" />
+                style="flex:1;padding:9px 12px;border:1px solid var(--border-strong);border-radius:10px;font-size:14px" />
               <button class="btn btn-green" id="shareGo" style="width:auto;padding:0 16px">Send</button>
             </div>
             ${shareMsg ? `<p class="meta" style="margin-top:6px;color:${shareMsgTone}">${esc(shareMsg)}</p>` : ""}
           </div>`
-          : `<button class="btn" id="shareOpenBtn" style="margin-top:8px;background:#e7e5e4;color:#44403c">📤 Share recipe</button>`}
+          : `<button class="btn" id="shareOpenBtn" style="margin-top:8px;background:var(--border);color:var(--chip-ink)">📤 Share recipe</button>`}
       </div>
     </div>`;
 }
@@ -1081,18 +1173,18 @@ function timerWidget() {
   if (!timer) return "";
   const pct = Math.max(0, Math.min(100, 100 - (timer.leftMs / timer.total) * 100));
   return `<div style="position:fixed;left:0;right:0;bottom:0;z-index:900;display:flex;justify-content:center;padding:10px;pointer-events:none">
-    <div style="pointer-events:auto;width:100%;max-width:420px;background:${timer.done ? "#059669" : "#1c1917"};color:#fff;border-radius:16px;padding:12px 14px;box-shadow:0 6px 24px rgba(0,0,0,.25)">
+    <div style="pointer-events:auto;width:100%;max-width:420px;background:${timer.done ? "var(--accent)" : "var(--toast-bg)"};color:var(--on-accent);border-radius:16px;padding:12px 14px;box-shadow:0 6px 24px rgba(0,0,0,.25)">
       <div style="display:flex;align-items:center;gap:10px">
         <span id="timerLeft" style="font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;min-width:74px">${fmtClock(timer.leftMs)}</span>
         <span style="flex:1;font-size:13px;opacity:.9;line-height:1.3">${timer.done ? "⏰ Time's up!" : esc(timer.name) + (timer.running ? "" : " · paused")}</span>
         ${timer.done
-          ? `<button class="btn" id="timerStop" style="width:auto;padding:8px 16px;background:#fff;color:#059669;font-weight:600">Stop</button>`
-          : `<button class="ic" id="timerToggle" title="${timer.running ? "pause" : "resume"}" style="color:#fff;font-size:16px;width:auto;padding:4px 8px">${timer.running ? "⏸" : "▶"}</button>
-             <button class="ic" id="timerAdd" title="add a minute" style="color:#fff;font-size:13px;width:auto;padding:4px 8px">+1m</button>
-             <button class="ic" id="timerCancel" title="cancel timer" style="color:#fff;font-size:16px;width:auto;padding:4px 8px">✕</button>`}
+          ? `<button class="btn" id="timerStop" style="width:auto;padding:8px 16px;background:var(--on-accent);color:var(--accent);font-weight:600">Stop</button>`
+          : `<button class="ic" id="timerToggle" title="${timer.running ? "pause" : "resume"}" style="color:var(--on-accent);font-size:16px;width:auto;padding:4px 8px">${timer.running ? "⏸" : "▶"}</button>
+             <button class="ic" id="timerAdd" title="add a minute" style="color:var(--on-accent);font-size:13px;width:auto;padding:4px 8px">+1m</button>
+             <button class="ic" id="timerCancel" title="cancel timer" style="color:var(--on-accent);font-size:16px;width:auto;padding:4px 8px">✕</button>`}
       </div>
       <div style="height:4px;background:rgba(255,255,255,.25);border-radius:2px;margin-top:10px;overflow:hidden">
-        <div id="timerFill" style="height:100%;background:#fff;width:${pct}%"></div>
+        <div id="timerFill" style="height:100%;background:var(--on-accent);width:${pct}%"></div>
       </div>
     </div>
   </div>`;
@@ -1139,22 +1231,22 @@ function cookIngredientsPanel(r) {
   const rest = ings.filter(i => !used.includes(i));
   const line = (i, strong) => {
     const amt = `${niceQty(i.use_qty * servings)} ${i.use_unit || ""}`.trim();
-    return `<div style="display:flex;gap:10px;padding:3px 0;font-size:15px;${strong ? "font-weight:600;color:#1c1917" : "color:#57534e"}">
-      <span style="flex:none;min-width:80px;text-align:right;color:#0284c7">${esc(amt)}</span>
+    return `<div style="display:flex;gap:10px;padding:3px 0;font-size:15px;${strong ? "font-weight:600;color:var(--text-strong)" : "color:var(--text-2)"}">
+      <span style="flex:none;min-width:80px;text-align:right;color:var(--sky-ink)">${esc(amt)}</span>
       <span style="flex:1">${esc(i.name)}</span>
     </div>`;
   };
   return `
-    <div style="margin-top:14px;background:#fff;border:1px solid #e7e5e4;border-radius:16px;padding:12px 14px">
+    <div style="margin-top:14px;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:12px 14px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
         <span class="meta" style="font-weight:600">${used.length ? "FOR THIS STEP" : "INGREDIENTS"}${servings !== 1 ? ` · ×${niceQty(servings)} servings` : ""}</span>
-        <button class="ic link" id="toggleCookIng" style="font-size:12px;border:0;background:none;cursor:pointer;color:#0284c7;width:auto">
+        <button class="ic link" id="toggleCookIng" style="font-size:12px;border:0;background:none;cursor:pointer;color:var(--sky-ink);width:auto">
           ${cookIngOpen ? "hide full list ▲" : `full list (${ings.length}) ▼`}
         </button>
       </div>
       ${used.length ? `<div style="margin-top:6px">${used.map(i => line(i, true)).join("")}</div>` : ""}
       ${cookIngOpen
-        ? `<div style="margin-top:8px;${used.length ? "padding-top:8px;border-top:1px solid #f5f5f4" : ""}">${(used.length ? rest : ings).map(i => line(i, false)).join("")}</div>`
+        ? `<div style="margin-top:8px;${used.length ? "padding-top:8px;border-top:1px solid var(--surface-2)" : ""}">${(used.length ? rest : ings).map(i => line(i, false)).join("")}</div>`
         : used.length ? "" : `<p class="meta" style="margin-top:6px">Nothing measured out for this step.</p>`}
     </div>`;
 }
@@ -1167,11 +1259,11 @@ function cookModeView() {
       <span class="name" style="font-weight:600;font-size:16px">${esc(r.title)}</span>
       <button class="ic" id="exitCook" style="font-size:18px">✕</button>
     </div>
-    <div style="height:5px;background:#e7e5e4;border-radius:3px;margin-bottom:20px;overflow:hidden">
-      <div style="height:100%;background:#059669;width:${((i + 1) / n) * 100}%;transition:width .2s"></div>
+    <div style="height:5px;background:var(--border);border-radius:3px;margin-bottom:20px;overflow:hidden">
+      <div style="height:100%;background:var(--accent);width:${((i + 1) / n) * 100}%;transition:width .2s"></div>
     </div>
     <div class="meta" style="font-weight:600;margin-bottom:8px">STEP ${i + 1} OF ${n}</div>
-    <div style="font-size:22px;line-height:1.4;min-height:120px;padding:20px;background:#fff;border:1px solid #e7e5e4;border-radius:16px">
+    <div style="font-size:22px;line-height:1.4;min-height:120px;padding:20px;background:var(--surface);border:1px solid var(--border);border-radius:16px">
       ${esc(r.steps[i])}
     </div>
     ${timerButtons(r.steps[i])}
@@ -1182,7 +1274,7 @@ function cookModeView() {
         ? `<button class="btn btn-green" id="finishCook" style="flex:2">Done — subtract stock ✓</button>`
         : `<button class="btn btn-green" id="nextStep" style="flex:2">Next →</button>`}
     </div>
-    <p style="font-size:12px;color:#a8a29e;margin-top:10px;text-align:center">Finishing subtracts this recipe's ingredients (×${niceQty(servings)}) from your pantry.</p>`;
+    <p style="font-size:12px;color:var(--muted-2);margin-top:10px;text-align:center">Finishing subtracts this recipe's ingredients (×${niceQty(servings)}) from your pantry.</p>`;
 }
 
 function listView() {
@@ -1205,7 +1297,7 @@ function listView() {
     <button class="btn btn-green" id="purchase" ${list.some(x => x.checked) ? "" : "disabled"}>Mark checked as purchased → Pantry</button>
     <button class="btn btn-sky" id="shop" style="width:auto;padding:10px 16px" ${list.some(x => !x.checked) ? "" : "disabled"}>🛒 Shop on Walmart</button>
   </div>
-  <p style="font-size:12px;color:#a8a29e;margin-top:8px;text-align:center">Buying adds the full package to your pantry stock.</p>`;
+  <p style="font-size:12px;color:var(--muted-2);margin-top:8px;text-align:center">Buying adds the full package to your pantry stock.</p>`;
   return html;
 }
 
@@ -1221,7 +1313,7 @@ function shopView() {
       <button class="check" data-scheck="${it.id}" title="mark checked">✓</button>
     </div>`;
   });
-  html += `<div style="padding:10px 12px;background:#fafaf9;border-top:1px solid #f5f5f4;font-size:12px;color:#78716c">
+  html += `<div style="padding:10px 12px;background:var(--bg);border-top:1px solid var(--surface-2);font-size:12px;color:var(--muted)">
     Check items off as you add them to your Walmart cart.</div></div>`;
   return html;
 }
@@ -1230,11 +1322,11 @@ function shopView() {
 // oldest batch first so only what you used comes off the stock.
 function pantryUseEditor(g, u) {
   const units = useUnitsFor(g);
-  return `<div class="row" style="margin-top:-1px;border-top-left-radius:0;border-top-right-radius:0;background:#fafaf9;gap:6px;flex-wrap:wrap">
+  return `<div class="row" style="margin-top:-1px;border-top-left-radius:0;border-top-right-radius:0;background:var(--bg);gap:6px;flex-wrap:wrap">
     <span class="meta" style="flex:none">Remove</span>
     <input id="puseAmt" value="${esc(u.amt)}" inputmode="decimal" placeholder="0"
-      style="width:70px;border:1px solid #d6d3d1;border-radius:8px;padding:6px;font-size:14px;text-align:center" />
-    <select id="puseUnit" style="padding:6px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px;max-width:150px">
+      style="width:70px;border:1px solid var(--border-strong);border-radius:8px;padding:6px;font-size:14px;text-align:center" />
+    <select id="puseUnit" style="padding:6px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px;max-width:150px">
       ${units.map(x => `<option value="${x.key}" ${x.key === u.unit ? "selected" : ""}>${esc(x.label)}</option>`).join("")}
     </select>
     <button class="btn btn-dark" id="puseGo" style="width:auto;padding:7px 14px;font-size:13px">Remove</button>
@@ -1254,7 +1346,7 @@ const money = (n) => "$" + (+n || 0).toFixed(2);
 function spendPanel() {
   if (!spendOpen)
     return `<p style="text-align:center;margin-top:16px">
-      <button class="ic link" id="spendToggle" style="font-size:12px;border:0;background:none;cursor:pointer;color:#0284c7;width:auto">💵 Spending</button>
+      <button class="ic link" id="spendToggle" style="font-size:12px;border:0;background:none;cursor:pointer;color:var(--sky-ink);width:auto">💵 Spending</button>
     </p>`;
 
   let body;
@@ -1270,28 +1362,28 @@ function spendPanel() {
         <span style="font-size:24px;font-weight:700">${money(thisMonth.total)}</span>
         <span class="meta">in ${ymLabel(thisMonth.ym)}</span>
       </div>
-      ${lastMonth ? `<p class="meta" style="margin-bottom:10px;color:${delta > 0 ? "#dc2626" : "#059669"};font-weight:600">
+      ${lastMonth ? `<p class="meta" style="margin-bottom:10px;color:${delta > 0 ? "var(--danger-ink)" : "var(--accent-ink)"};font-weight:600">
         ${delta > 0 ? "▲" : "▼"} ${money(Math.abs(delta))} vs ${ymLabel(lastMonth.ym)}</p>` : ""}
       ${spend.months.map(m => `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
         <span class="meta" style="width:62px;flex:none">${ymLabel(m.ym)}</span>
-        <span style="flex:1;height:8px;background:#f5f5f4;border-radius:4px;overflow:hidden">
-          <i style="display:block;height:100%;width:${Math.round(m.total * 100 / peak)}%;background:#059669"></i></span>
+        <span style="flex:1;height:8px;background:var(--surface-2);border-radius:4px;overflow:hidden">
+          <i style="display:block;height:100%;width:${Math.round(m.total * 100 / peak)}%;background:var(--accent)"></i></span>
         <span class="meta" style="width:60px;text-align:right;flex:none">${money(m.total)}</span>
       </div>`).join("")}
     </div>`;
 
     if (spend.changes.length)
-      body += `<div style="padding:10px 12px;border-top:1px solid #f5f5f4">
+      body += `<div style="padding:10px 12px;border-top:1px solid var(--surface-2)">
         <div class="meta" style="font-weight:600;margin-bottom:6px">PRICE CHANGES</div>
         ${spend.changes.map(c => `<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:3px">
           <span style="font-size:13px;text-transform:capitalize">${esc(c.name)}</span>
-          <span class="meta" style="flex:none;color:${c.pct > 0 ? "#dc2626" : "#059669"};font-weight:600">
-            ${money(c.unit)} <span style="font-weight:400;color:#a8a29e">was ${money(c.was)}</span> ${c.pct > 0 ? "▲" : "▼"}${Math.abs(c.pct)}%</span>
+          <span class="meta" style="flex:none;color:${c.pct > 0 ? "var(--danger-ink)" : "var(--accent-ink)"};font-weight:600">
+            ${money(c.unit)} <span style="font-weight:400;color:var(--muted-2)">was ${money(c.was)}</span> ${c.pct > 0 ? "▲" : "▼"}${Math.abs(c.pct)}%</span>
         </div>`).join("")}
       </div>`;
 
     if (spend.top.length)
-      body += `<div style="padding:10px 12px;border-top:1px solid #f5f5f4">
+      body += `<div style="padding:10px 12px;border-top:1px solid var(--surface-2)">
         <div class="meta" style="font-weight:600;margin-bottom:6px">BIGGEST SPEND</div>
         ${spend.top.map(t => `<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:3px">
           <span style="font-size:13px;text-transform:capitalize">${esc(t.name)}</span>
@@ -1311,7 +1403,7 @@ function pantryView() {
   let html = `<div class="addbar">
     <input id="pname" placeholder="Item" style="flex:1;min-width:120px" />
     <input id="pamt" placeholder="Amount" type="number" style="width:90px" />
-    <select id="punit" style="padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:14px;max-width:130px">
+    <select id="punit" style="padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:14px;max-width:130px">
       ${UNITS.map(u => `<option value="${u.key}">${u.label}</option>`).join("")}
     </select>
     <button class="btn btn-dark" id="padd" style="width:auto;padding:0 14px">+</button>
@@ -1323,7 +1415,7 @@ function pantryView() {
   const busy = pantryPhotoBusy || receiptBusy || barcodeBusy;
   const scanBtn = (id, label, working) =>
     `<button class="btn" id="${id}" ${busy ? "disabled" : ""}
-      style="background:#e7e5e4;color:#44403c;font-size:13px;flex:1;padding:0 6px">${working || label}</button>`;
+      style="background:var(--border);color:var(--chip-ink);font-size:13px;flex:1;padding:0 6px">${working || label}</button>`;
   html += `<div style="display:flex;gap:6px;margin-bottom:6px">
     ${scanBtn("pantryPhotoBtn", "📷 Photo", pantryPhotoBusy && "Reading…")}
     ${scanBtn("barcodeBtn", "🏷️ Barcode", barcodeBusy && "Looking up…")}
@@ -1333,13 +1425,13 @@ function pantryView() {
   if (barcodeManual != null) {
     html += `<div style="display:flex;gap:6px;margin-bottom:12px">
       <input id="barcodeCode" value="${esc(barcodeManual)}" inputmode="numeric" placeholder="Barcode number"
-        style="flex:1;padding:8px 10px;border:1px solid #d6d3d1;border-radius:8px;font-size:14px" />
+        style="flex:1;padding:8px 10px;border:1px solid var(--border-strong);border-radius:8px;font-size:14px" />
       <button class="btn btn-dark" id="barcodeGo" ${busy ? "disabled" : ""} style="width:auto;padding:0 14px">Look up</button>
       <button class="ic" id="barcodeManualClose" title="cancel">✕</button>
     </div>`;
   } else {
     html += `<p style="text-align:right;margin-bottom:12px">
-      <button class="ic link" id="barcodeManualOpen" style="font-size:11px;border:0;background:none;cursor:pointer;color:#0284c7;width:auto">type a barcode number</button>
+      <button class="ic link" id="barcodeManualOpen" style="font-size:11px;border:0;background:none;cursor:pointer;color:var(--sky-ink);width:auto">type a barcode number</button>
     </p>`;
   }
 
@@ -1354,18 +1446,18 @@ function pantryView() {
       const pkgs = it.pkg_base > 0 ? +(it.base / it.pkg_base).toFixed(2) : it.base;
       const nonFood = it.food === false;
       html += `<div class="pitem" style="gap:6px;align-items:center;flex-wrap:wrap;${nonFood ? "opacity:.55" : ""}">
-        <input type="checkbox" data-ruse="${i}" ${it.use ? "checked" : ""} style="accent-color:#059669;width:16px;height:16px;flex:none" />
-        <input data-rname="${i}" value="${esc(it.name)}" style="flex:2;min-width:80px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 7px;font-size:13px" />
-        ${nonFood ? `<span class="meta" style="font-size:10px;background:#f5f5f4;padding:1px 5px;border-radius:6px;flex:none">non-food</span>` : ""}
+        <input type="checkbox" data-ruse="${i}" ${it.use ? "checked" : ""} style="accent-color:var(--accent);width:16px;height:16px;flex:none" />
+        <input data-rname="${i}" value="${esc(it.name)}" style="flex:2;min-width:80px;border:1px solid var(--border);border-radius:6px;padding:5px 7px;font-size:13px" />
+        ${nonFood ? `<span class="meta" style="font-size:10px;background:var(--surface-2);padding:1px 5px;border-radius:6px;flex:none">non-food</span>` : ""}
         <input data-rpkg="${i}" value="${esc(pkgs)}" inputmode="decimal" title="how many you bought"
-          style="width:48px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 4px;font-size:13px;text-align:center" />
+          style="width:48px;border:1px solid var(--border);border-radius:6px;padding:5px 4px;font-size:13px;text-align:center" />
         <span class="meta" style="min-width:52px;max-width:80px">${esc(it.pkg_label || "each")}</span>
         <span class="meta" style="flex:none">$</span>
         <input data-rprice="${i}" value="${it.price ? esc(it.price) : ""}" inputmode="decimal" placeholder="—" title="what this line cost"
-          style="width:56px;border:1px solid #e7e5e4;border-radius:6px;padding:5px 4px;font-size:13px;text-align:right" />
+          style="width:56px;border:1px solid var(--border);border-radius:6px;padding:5px 4px;font-size:13px;text-align:right" />
       </div>`;
     });
-    html += `<div style="padding:8px 12px;background:#fafaf9;border-top:1px solid #f5f5f4;display:flex;justify-content:space-between">
+    html += `<div style="padding:8px 12px;background:var(--bg);border-top:1px solid var(--surface-2);display:flex;justify-content:space-between">
         <span class="meta">${kept.length} item${kept.length === 1 ? "" : "s"} checked</span>
         <span class="meta" style="font-weight:600">${total > 0 ? "$" + total.toFixed(2) : "no prices read"}</span>
       </div>
@@ -1381,8 +1473,8 @@ function pantryView() {
       <div class="parsed-head">Found this — adjust if needed, then add</div>
       ${p.product ? `<div style="padding:8px 12px 0"><span class="meta">scanned: ${esc([p.brand, p.product].filter(Boolean).join(" "))}</span></div>` : ""}
       <div class="pitem" style="gap:6px;align-items:center;flex-wrap:wrap">
-        <input id="ppName" value="${esc(p.name)}" style="flex:2;min-width:100px;border:1px solid #e7e5e4;border-radius:6px;padding:6px 8px;font-size:14px" />
-        <input id="ppAmt" value="${esc(p.base)}" inputmode="decimal" style="width:70px;border:1px solid #e7e5e4;border-radius:6px;padding:6px;font-size:14px;text-align:center" />
+        <input id="ppName" value="${esc(p.name)}" style="flex:2;min-width:100px;border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:14px" />
+        <input id="ppAmt" value="${esc(p.base)}" inputmode="decimal" style="width:70px;border:1px solid var(--border);border-radius:6px;padding:6px;font-size:14px;text-align:center" />
         <span class="meta" style="min-width:40px">${esc(p.base_unit)}</span>
         <span class="meta">≈ ${p.pkg_base ? (p.base / p.pkg_base).toFixed(1) : "?"} ${esc(p.pkg_label)}</span>
       </div>
@@ -1399,13 +1491,13 @@ function pantryView() {
     const pk = pkgsFromBase(g.base, g.pkg_base);
     const pct = Math.max(0, Math.min(100, pk * 100 / Math.max(1, Math.ceil(pk))));
     const exp = g.expLabel;
-    const toneColor = exp ? { bad: "#dc2626", warn: "#d97706", ok: "#059669" }[exp.tone] : "";
+    const toneColor = exp ? { bad: "var(--danger-ink)", warn: "var(--warn-ink)", ok: "var(--accent-ink)" }[exp.tone] : "";
     const o = g.oldest;
     const sl = o.shelf_life;
     const states = sl ? STORAGE_STATES.filter(s => typeof sl[s] === "number") : [];
     const cur = o.storage || (sl && sl.where) || "";
     const storageSel = states.length > 1
-      ? `<select data-pstore="${o.id}" style="font-size:11px;padding:2px 4px;border:1px solid #e7e5e4;border-radius:6px;color:#57534e">
+      ? `<select data-pstore="${o.id}" style="font-size:11px;padding:2px 4px;border:1px solid var(--border);border-radius:6px;color:var(--text-2)">
           ${states.map(s => `<option value="${s}" ${s === cur ? "selected" : ""}>${s}</option>`).join("")}
         </select>`
       : "";
@@ -1421,7 +1513,7 @@ function pantryView() {
       <span class="bar"><i style="width:${pct}%"></i></span>
       <button class="ic" data-poldest="${o.id}" data-d="-1" title="use one package (oldest first)">−</button>
       <button class="ic" data-puse="${esc(g.name)}" title="use a specific amount"
-        style="font-size:11px;border:1px solid #e7e5e4;border-radius:8px;padding:3px 6px;white-space:nowrap;${useOpen ? "background:#f5f5f4;color:#44403c" : ""}">− amt</button>
+        style="font-size:11px;border:1px solid var(--border);border-radius:8px;padding:3px 6px;white-space:nowrap;${useOpen ? "background:var(--surface-2);color:var(--chip-ink)" : ""}">− amt</button>
       <button class="ic del" data-pgroupdel="${esc(g.name)}" title="remove all of this item">🗑</button>
     </div>${useOpen ? pantryUseEditor(g, pantryUse) : ""}`;
   }).join("");
@@ -1920,14 +2012,14 @@ async function saveManualRecipe() {
 
 async function shareRecipe() {
   const username = (($("#shareUser") || {}).value || "").trim();
-  if (!username) { shareMsg = "Enter a username."; shareMsgTone = "#dc2626"; render(); return; }
+  if (!username) { shareMsg = "Enter a username."; shareMsgTone = "var(--danger-ink)"; render(); return; }
   if (!viewing) return;
   const r = await api(`/recipes/${viewing.id}/share`, J({ m: "POST", b: { username } }));
-  if (r.error) { shareMsg = r.error; shareMsgTone = "#dc2626"; render(); return; }
+  if (r.error) { shareMsg = r.error; shareMsgTone = "var(--danger-ink)"; render(); return; }
   shareMsg = r.duplicate
     ? `Sent to ${r.to} (they already had one with this name, so now they have both).`
     : `Sent to ${r.to} — it's in their saved recipes.`;
-  shareMsgTone = "#059669";
+  shareMsgTone = "var(--accent-ink)";
   shareOpen = true; // keep the panel open to show the confirmation
   render();
 }
@@ -2157,14 +2249,14 @@ let authMode = "login", authErr = "", needsInvite = false;
 function authScreen() {
   const field = (id, ph, type) =>
     `<input id="${id}" placeholder="${ph}" type="${type || "text"}" autocapitalize="none" autocorrect="off"
-      style="width:100%;padding:11px 12px;border:1px solid #d6d3d1;border-radius:10px;font-size:15px;margin-bottom:10px" />`;
+      style="width:100%;padding:11px 12px;border:1px solid var(--border-strong);border-radius:10px;font-size:15px;margin-bottom:10px" />`;
   const isReg = authMode === "register";
   return `
     <p class="sub" style="text-align:center">Sign in to your kitchen.</p>
     <div style="max-width:340px;margin:16px auto 0">
-      <div style="display:flex;gap:4px;background:rgba(214,211,209,.4);padding:4px;border-radius:12px;margin-bottom:16px">
-        <button data-auth="login" style="flex:1;border:0;padding:8px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;${!isReg ? "background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.06)" : "background:none;color:#78716c"}">Log in</button>
-        <button data-auth="register" style="flex:1;border:0;padding:8px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;${isReg ? "background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.06)" : "background:none;color:#78716c"}">Create account</button>
+      <div style="display:flex;gap:4px;background:var(--tabs-bg);padding:4px;border-radius:12px;margin-bottom:16px">
+        <button data-auth="login" style="flex:1;border:0;padding:8px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;${!isReg ? "background:var(--raised);box-shadow:var(--shadow-sm)" : "background:none;color:var(--muted)"}">Log in</button>
+        <button data-auth="register" style="flex:1;border:0;padding:8px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;${isReg ? "background:var(--raised);box-shadow:var(--shadow-sm)" : "background:none;color:var(--muted)"}">Create account</button>
       </div>
       ${field("authUser", "Username")}
       ${field("authPass", "Password", "password")}
@@ -2212,6 +2304,32 @@ async function boot() {
   if (me && me.user) await startApp();
   else showAuth();
 }
+
+// ---------- theme ----------
+// Dracula is what the stylesheet ships with, so an unset preference needs no
+// work on load (and no flash of the wrong palette). Only "daylight" is stored.
+const THEME_KEY = "pantry.theme";
+function applyTheme(name) {
+  const dracula = name !== "daylight";
+  document.documentElement.dataset.theme = dracula ? "dracula" : "daylight";
+  const meta = $('meta[name="theme-color"]');
+  if (meta) meta.content = dracula ? "#7d0d1e" : "#059669";
+  const btn = $("#themeBtn");
+  if (btn) {
+    btn.textContent = dracula ? "🦇" : "☀️";
+    btn.title = dracula ? "Switch to daylight" : "Switch to Dracula";
+  }
+}
+let theme = "dracula";
+try { theme = localStorage.getItem(THEME_KEY) || "dracula"; } catch {}
+applyTheme(theme);
+
+const themeBtn = $("#themeBtn");
+if (themeBtn) themeBtn.onclick = () => {
+  theme = theme === "daylight" ? "dracula" : "daylight";
+  try { localStorage.setItem(THEME_KEY, theme); } catch {}
+  applyTheme(theme);
+};
 
 const logoutBtn = $("#logout");
 if (logoutBtn) logoutBtn.onclick = async () => { await api("/logout", { method: "POST" }); authMode = "login"; showAuth(); };
