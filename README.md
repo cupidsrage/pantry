@@ -118,6 +118,19 @@ totals, your biggest-spend items, and per-item price changes — compared by uni
 price, so buying two of something doesn't read as a price hike. Items with no
 price are still added to the pantry; they just don't count toward spending.
 
+## Theme
+
+The app ships in **Dracula** — near-black, blood crimson, candle-lit violet, a
+serif title. The 🦇 button beside the title switches to **Daylight**, the
+original green-on-stone palette; the choice is remembered per device in
+`localStorage` (nothing is stored server-side, so each phone/browser picks its
+own).
+
+Every colour in `public/index.html` goes through a CSS custom property, and a
+theme is just one block of values — `:root` holds Dracula, `:root[data-theme=
+"daylight"]` holds the original. To retint the app, change those values; to add
+a third theme, copy a block and give it a new `data-theme` name.
+
 ## Install on your phone (PWA)
 
 The app is a Progressive Web App — no app store needed.
