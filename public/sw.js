@@ -1,9 +1,10 @@
 // Bump CACHE when the app shell changes so clients pick up the new version.
-const CACHE = "pantry-v5";
+const CACHE = "pantry-v6";
 // The lib modules are ES imports from index.html, so a cold offline start needs
 // them cached alongside the page itself. test/client.test.js keeps this in sync.
 const SHELL = ["/", "/index.html", "/manifest.webmanifest", "/icon.svg",
-  "/lib/units.js", "/lib/expiry.js", "/lib/pantry.js", "/lib/recipes.js"];
+  "/lib/units.js", "/lib/expiry.js", "/lib/pantry.js", "/lib/recipes.js",
+  "/lib/durations.js", "/lib/cookalong.js"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
