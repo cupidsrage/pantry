@@ -31,12 +31,16 @@ Runs `node --test` — no framework, no dev dependencies.
 
 The logic worth testing is the arithmetic: unit conversion, expiry day
 boundaries, drawing down pantry batches oldest-first, matching item names,
-recipe coverage, spend aggregation, and reminder timing. All of it lives in
-`lib/`, which the server imports directly and the browser loads from `/lib`, so
-there is one copy of each rule rather than one per side. That matters most for
-`norm()` in `lib/units.js` — the browser uses it to decide whether a recipe shows
-"✓ can make", and the server uses it to decide which batch to subtract when you
-cook. If those two ever disagreed, nothing would break loudly.
+recipe coverage, spend aggregation, reminder timing, reading durations out of
+recipe steps, and interleaving several recipes into one cooking schedule. All of
+it lives in `lib/`, which the server imports directly and the browser loads from
+`/lib`, so there is one copy of each rule rather than one per side. That matters
+most for `norm()` in `lib/units.js` — the browser uses it to decide whether a
+recipe shows "✓ can make", and the server uses it to decide which batch to
+subtract when you cook. If those two ever disagreed, nothing would break loudly.
+The same goes for `lib/durations.js`: the countdown a step offers you and the
+minutes the cook-along schedule reserves for it are the same number by
+construction, so a timer can't disagree with the plan it came from.
 
 `test/client.test.js` also checks that the inline `<script>` in `index.html`
 parses, that everything it imports from `/lib` is really exported, and that the
@@ -75,6 +79,52 @@ chicken appears to cover both Monday and Thursday and you come home short.
 This is the one feature that runs on Sonnet rather than Haiku — it's weighing
 expiry against variety against time against budget, which is reasoning rather
 than extraction. It runs about once a week, so the difference is negligible.
+
+## Cook together
+
+Cooking two dishes is not twice one dish — the hard part is the interleaving,
+and doing it in your head is what makes it stressful. On the **Saved** tab,
+**🍳 Cook several recipes at once** takes the dishes you're making and gives you
+one timeline instead of three.
+
+Pick the recipes (and how many servings of each), say when you want to eat — or
+start now and be told when dinner lands — and you get a single ordered list of
+what to do when: *6:23 preheat the oven, 6:29 parboil the potatoes, 6:39 chop the
+onion for the curry.* Tick steps off as you go; the "now" line moves down the
+list on its own.
+
+What the schedule is actually doing:
+
+- **It works backwards from dinner**, so every dish finishes at the same moment
+  rather than one going cold while the other cooks.
+- **There is one cook.** Two steps that need your hands never overlap. Steps that
+  cook without you — anything that bakes, simmers, rests, chills, proofs — are
+  allowed to overlap freely, and that's where the time comes from.
+- **Food that has to be made early says so.** When two dishes want your hands at
+  once, one goes first, and its step reads "holds 6m" rather than silently
+  pretending it comes out at serving time.
+- **Two dishes wanting the oven at different temperatures** is the one clash it
+  can't fix by moving things around, so it's flagged with the window where they
+  collide instead of being quietly planned.
+
+Above the timeline is everything the whole session needs, totalled across the
+dishes with each one's servings applied — so the onion gets chopped once, and
+you find out before you start that there isn't enough of it. Finishing subtracts
+every dish's ingredients from the pantry in one go.
+
+Timers are per step and several run at once, because two pots are on the clock
+at once. The session survives a reload — a phone locks itself halfway through
+dinner — and stepping out to look something up leaves a **Resume** banner on the
+Saved tab.
+
+Step times come from the steps themselves ("simmer 25 minutes"). Steps that don't
+name a time share out whatever is left of the recipe's own prep+cook estimate, so
+a recipe that says 35 minutes still adds up to about 35. Nothing here calls the
+model — it's arithmetic, in `lib/cookalong.js`, and it's the most-tested file in
+the project for that reason.
+
+If you fall behind, **Push dinner later** moves the whole schedule rather than
+leaving every remaining step marked late.
 
 ## Cook & thaw reminders (optional)
 
