@@ -93,6 +93,14 @@ what to do when: *6:23 preheat the oven, 6:29 parboil the potatoes, 6:39 chop th
 onion for the curry.* Tick steps off as you go; the "now" line moves down the
 list on its own.
 
+**From the Plan tab**, any night with two or more meals on it gets a
+**🍳 Cook these together** button, which hands the whole evening to the scheduler
+without asking you to pick the same recipes again. The serve time comes from the
+meals themselves — if they were planned for different times it aims at the
+earliest and says so, and if the mealtime has already gone by it starts from now
+instead. Tapping a dish's name in the timeline opens its full recipe, at the
+servings the session is cooking, and leaves a **Resume** banner to come back to.
+
 What the schedule is actually doing:
 
 - **It works backwards from dinner**, so every dish finishes at the same moment

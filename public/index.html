@@ -645,6 +645,18 @@ function planView() {
       </div>`;
     }
 
+    // Two dishes on one night is a cook-along waiting to happen: same day, and
+    // you want them on the table together. Hand the day straight to the
+    // scheduler rather than making anyone re-pick the same recipes by hand.
+    const cookable = dayMeals.filter(m => m.recipe);
+    if (cookable.length >= 2) {
+      const running = cookAlong && cookAlong.stage === "run";
+      html += `<button class="btn btn-sky" data-cookday="${dY}" style="margin-top:8px;padding:6px 10px;font-size:12px">
+        ${running
+          ? G("🔥 Back to the feast", "🍳 Resume cooking")
+          : G(`🔥 Conduct these ${cookable.length} as one feast`, `🍳 Cook these ${cookable.length} together`)}</button>`;
+    }
+
     if (planAddDay === dY) {
       html += `<div style="margin-top:8px;padding:8px;background:var(--info-soft);border-radius:8px">
         ${recipePicker()}
@@ -1387,6 +1399,54 @@ function serveTimeToMs(text) {
   return d.getTime();
 }
 
+// A planned meal is a local wall-clock date and time; this is the instant it
+// names. Same reading as the cook/thaw reminders make of it.
+function planDayInstant(date, hhmm) {
+  const [y, mo, d] = String(date || "").split("-").map(Number);
+  const [h, mn] = String(hhmm || "18:00").split(":").map(Number);
+  if (![y, mo, d, h, mn].every(Number.isFinite)) return null;
+  return new Date(y, mo - 1, d, h, mn, 0, 0).getTime();
+}
+function planDayLabel(date) {
+  const [y, mo, d] = String(date || "").split("-").map(Number);
+  if (![y, mo, d].every(Number.isFinite)) return String(date || "");
+  const dt = new Date(y, mo - 1, d);
+  return `${DOW[dt.getDay()]} ${MON[dt.getMonth()]} ${dt.getDate()}`;
+}
+
+function showSavedTab() {
+  tab = "saved"; viewing = null;
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "saved"));
+}
+
+// Everything planned for one night, handed to the scheduler whole. The serve
+// time comes from the meals themselves rather than being asked for again — the
+// plan already says when you meant to eat.
+async function cookPlannedDay(date) {
+  // A session already under way owns the timers and the ticked-off steps. Don't
+  // throw it away because a plan button was tapped; show it instead.
+  if (cookAlong && cookAlong.stage === "run") {
+    cookAlong.minimized = false; showSavedTab(); saveCookAlong(); render(); return;
+  }
+  const dayMeals = meals.filter(m => m.date === date && m.recipe);
+  if (dayMeals.length < 2) return;
+
+  const c = emptyCookAlong();
+  c.picks = [...new Set(dayMeals.map(m => m.recipe.id))];
+  for (const id of c.picks) c.servings[id] = 1;
+  const times = [...new Set(dayMeals.map(m => m.meal_time).filter(Boolean))].sort();
+  const eatAt = planDayInstant(date, times[0] || "18:00");
+  // A night that has already been and gone can't be cooked towards; start now
+  // and let the plan tell you when dinner lands instead.
+  const towards = eatAt && eatAt > Date.now() + 5 * 60000 ? eatAt : null;
+  c.mode = towards ? "serve" : "now";
+  if (towards) c.timeText = times[0] || "18:00";
+  c.fromPlan = { date, mixedTimes: times.length > 1, missed: !towards };
+  cookAlong = c;
+  showSavedTab();
+  await buildCookAlong(towards);
+}
+
 // Only a running session is worth storing, and only its inputs: the plan itself
 // is arithmetic, so it comes back identical from the same dishes and serve time.
 function saveCookAlong() {
@@ -1395,7 +1455,7 @@ function saveCookAlong() {
     localStorage.setItem(COOK_KEY, JSON.stringify({
       picks: cookAlong.picks, servings: cookAlong.servings,
       serveAt: cookAlong.serveAt, startAt: cookAlong.startAt,
-      done: cookAlong.done, minimized: cookAlong.minimized,
+      done: cookAlong.done, minimized: cookAlong.minimized, fromPlan: cookAlong.fromPlan,
     }));
   } catch {}
 }
@@ -1449,7 +1509,9 @@ function stopCookTick() { clearInterval(cookTick); cookTick = null; }
 
 function endCookAlong() { cookAlong = null; stopCookTick(); forgetCookAlong(); }
 
-async function buildCookAlong() {
+// `explicitServeAt` is for a session started from the meal plan, where the
+// instant is already known and isn't "today or tomorrow at HH:MM".
+async function buildCookAlong(explicitServeAt = null) {
   const c = cookAlong;
   if (c.picks.length < 2) { c.error = "Pick at least two — one recipe is just cooking."; render(); return; }
   c.busy = true; c.error = ""; render();
@@ -1458,7 +1520,9 @@ async function buildCookAlong() {
     if (dishes.length < 2) throw new Error("Couldn't load those recipes. Try again.");
     if (!dishes.some(d => d.steps.length))
       throw new Error("None of those recipes has steps saved, so there's nothing to schedule.");
-    if (c.mode === "serve") {
+    if (explicitServeAt) {
+      c.serveAt = explicitServeAt; c.startAt = null;
+    } else if (c.mode === "serve") {
       const at = serveTimeToMs(c.timeText);
       if (!at) throw new Error("That doesn't look like a time.");
       c.serveAt = at; c.startAt = null;
@@ -1567,11 +1631,14 @@ function cookRunView() {
   // say where it went rather than quietly dropping it from the session.
   const unscheduled = c.dishes.filter(d => !p.dishes.some(pd => String(pd.id) === String(d.id)));
 
+  // Tapping a dish opens its recipe in full — mid-cook you want the photo, or
+  // the amount three steps ahead. The session steps aside rather than ending.
   const chips = p.dishes.map(d => `
-    <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:${dishInk(d.order)};background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:4px 10px">
+    <button data-cookopen="${d.id}" data-cookservings="${d.servings}" title="open ${esc(d.title)}"
+      style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;cursor:pointer;color:${dishInk(d.order)};background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:4px 10px">
       ● ${esc(d.title)}${d.servings !== 1 ? ` ×${niceQty(d.servings)}` : ""}
-      <span style="color:var(--muted);font-weight:400">ready ${clockAt(d.readyAt)}</span>
-    </span>`).join("");
+      <span style="color:var(--muted);font-weight:400">ready ${clockAt(d.readyAt)} ↗</span>
+    </button>`).join("");
 
   const conflicts = p.conflicts.map(x => `
     <div style="margin-top:8px;padding:10px 12px;background:var(--surface);border:1px solid var(--accent-soft-border);border-radius:12px;font-size:13px;line-height:1.45;color:var(--warn-ink)">
@@ -1643,6 +1710,9 @@ function cookRunView() {
         <div style="height:100%;background:var(--accent);width:${pct}%;transition:width .2s"></div>
       </div>
       <div class="meta">${minutesToText(p.spanMin)} start to finish · ${minutesToText(p.handsOnMin)} of it hands-on · ${done.size}/${p.events.length} steps done</div>
+      ${c.fromPlan ? `<div class="meta" style="margin-top:6px">From your plan for ${esc(planDayLabel(c.fromPlan.date))}${
+        c.fromPlan.missed ? " — that mealtime has passed, so this starts from now"
+        : c.fromPlan.mixedTimes ? " — those meals had different times, so this aims at the earliest" : ""}</div>` : ""}
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px">${chips}</div>
     </div>
     ${conflicts}
@@ -2099,7 +2169,19 @@ function wire() {
   if (cSc) cSc.onclick = () => { cookAlong.search = ""; renderKeepingSearch("cookSearch", "cookPickList", true); };
   document.querySelectorAll("[data-cookmode]").forEach(b => b.onclick = () => { cookAlong.mode = b.dataset.cookmode; render(); });
   const cTime = $("#cookTime"); if (cTime) cTime.oninput = () => { cookAlong.timeText = cTime.value; };
-  const cBuild = $("#cookBuild"); if (cBuild) cBuild.onclick = buildCookAlong;
+  const cBuild = $("#cookBuild"); if (cBuild) cBuild.onclick = () => buildCookAlong();
+  document.querySelectorAll("[data-cookday]").forEach(b => b.onclick = () => cookPlannedDay(b.dataset.cookday));
+  document.querySelectorAll("[data-cookopen]").forEach(b => b.onclick = async () => {
+    const r = await api(`/recipes/${b.dataset.cookopen}`);
+    if (!r || r.error) return;
+    // Step aside, don't end: the Resume banner sits right above the recipe list.
+    cookAlong.minimized = true; saveCookAlong();
+    // Opened at the servings the session is cooking, so the amounts on screen
+    // are the amounts in the pan.
+    viewing = r; servings = +b.dataset.cookservings || 1;
+    cookStep = -1; showPhotos = false; shareOpen = false; shareMsg = ""; err = "";
+    render();
+  });
   const cPush = $("#cookPush");
   if (cPush) cPush.onclick = () => {
     const behind = Math.round((Date.now() - cookAlong.plan.events.filter(e => !cookAlong.done.includes(e.key))[0].start) / 60000);
