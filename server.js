@@ -13,6 +13,7 @@ import { summarizeSpend } from "./lib/spend.js";
 import { mealTimes, thawAtMs, isDue, REMINDER_WINDOW_MS } from "./lib/schedule.js";
 import { weekDates, normalizeProposal, summarizePlan } from "./lib/planner.js";
 import { planShoppingList, estimateListCost } from "./lib/shopping.js";
+import { findDuplicateRecipe } from "./lib/recipes.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -1075,8 +1076,19 @@ app.get("/api/recipes/:id", requireAuth, (req, res) => {
 });
 app.post("/api/recipes", requireAuth, (req, res) => {
   const { title, source_url = "", ingredients = [], steps = [], nutrition = null, photos = [],
-    prep_min = 0, cook_min = 0 } = req.body;
+    prep_min = 0, cook_min = 0, allow_duplicate = false } = req.body;
   if (!title?.trim()) return res.status(400).json({ error: "title required" });
+  // Don't let the same recipe land in the book twice — a double-tapped Save, or
+  // the same link imported again. The client asks again with allow_duplicate
+  // when the cook says it really is a different dish under the same name.
+  if (!allow_duplicate) {
+    const mine = db.prepare("SELECT id,title,source_url,created FROM recipes WHERE user_id=?").all(req.userId);
+    const dupe = findDuplicateRecipe(mine, { title: title.trim(), source_url });
+    if (dupe) return res.status(409).json({
+      error: `You already saved \u201c${dupe.title}\u201d.`,
+      duplicate: { id: dupe.id, title: dupe.title, created: dupe.created },
+    });
+  }
   const info = db.prepare("INSERT INTO recipes (title,source_url,ingredients,steps,created,nutrition,photos,prep_min,cook_min,user_id) VALUES (?,?,?,?,?,?,?,?,?,?)")
     .run(title.trim(), source_url, JSON.stringify(ingredients), JSON.stringify(steps), Date.now(),
       nutrition ? JSON.stringify(nutrition) : "",
@@ -1126,13 +1138,16 @@ app.post("/api/recipes/:id/share", requireAuth, (req, res) => {
   if (me && to === me.username) return res.status(400).json({ error: "that's your own account" });
   const recipient = db.prepare("SELECT id FROM users WHERE username=?").get(to);
   if (!recipient) return res.status(404).json({ error: "no account with that username" });
-  // avoid piling up indistinguishable duplicates if shared repeatedly
-  const dupe = db.prepare("SELECT 1 FROM recipes WHERE user_id=? AND title=?").get(recipient.id, src.title);
-  const newTitle = dupe && me ? `${src.title} (from ${me.username})` : src.title;
+  // Sharing the same recipe twice (or sharing back one they gave you) would
+  // leave the recipient with two of the same thing to scroll past, so the copy
+  // is skipped rather than renamed. The sender is told, so it isn't a silent no-op.
+  const theirs = db.prepare("SELECT id,title,source_url FROM recipes WHERE user_id=?").all(recipient.id);
+  const dupe = findDuplicateRecipe(theirs, { title: src.title, source_url: src.source_url });
+  if (dupe) return res.json({ ok: true, to, duplicate: true, title: dupe.title });
   // copy the recipe verbatim to the recipient (photos/nutrition/steps/times included)
   db.prepare("INSERT INTO recipes (title,source_url,ingredients,steps,created,nutrition,photos,prep_min,cook_min,user_id) VALUES (?,?,?,?,?,?,?,?,?,?)")
-    .run(newTitle, src.source_url, src.ingredients, src.steps, Date.now(), src.nutrition || "", src.photos || "", src.prep_min || 0, src.cook_min || 0, recipient.id);
-  res.json({ ok: true, to, duplicate: !!dupe });
+    .run(src.title, src.source_url, src.ingredients, src.steps, Date.now(), src.nutrition || "", src.photos || "", src.prep_min || 0, src.cook_min || 0, recipient.id);
+  res.json({ ok: true, to, duplicate: false });
 });
 
 // ---------- meal plan ----------

@@ -213,7 +213,7 @@
 import { UNITS, unitByKey, showBase, pkgsFromBase, norm, niceQty } from "/lib/units.js";
 import { STORAGE_STATES } from "/lib/expiry.js";
 import { groupBatches } from "/lib/pantry.js";
-import { recipeCoverage as coverageOf, recipeSoonestExpiry as soonestExpiryOf, recipeMatch } from "/lib/recipes.js";
+import { recipeCoverage as coverageOf, recipeSoonestExpiry as soonestExpiryOf, recipeMatch, findDuplicateRecipe } from "/lib/recipes.js";
 import { parseDurations } from "/lib/durations.js";
 import { planCookAlong, mergeIngredients, cookItems } from "/lib/cookalong.js";
 
@@ -689,6 +689,8 @@ let shopping = false;
 let recipeMode = "import";  // "import" (link/paste), "manual", or "photo"
 let manualName = "", manualIngredients = "", manualDirections = "";
 let parsedDirty = false;      // ingredient list was hand-edited since parse
+let dupe = null;              // a save the server refused as already-saved:
+                              // { id, title, body, done } — see saveIfNew()
 let photoImages = [];         // multiple pages: [{base64, mediaType, dataUrl}]
 let savedSort = "recent";     // "recent" | "az" | "canmake" | "expiring"
 let savedSearch = "";         // Saved tab search box text
@@ -798,6 +800,30 @@ function lightboxHtml() {
     </div>`;
 }
 
+// The server turned a save down because this recipe is already in the book.
+// Neither answer is obvious from here — two dishes really can share a name — so
+// both ways out are offered: look at the one already saved, or save it anyway.
+function dupeNotice() {
+  if (!dupe) return "";
+  return `<div style="border:1px solid var(--border-strong);background:var(--surface);border-radius:12px;padding:12px;margin-top:10px">
+    <p style="font-size:14px;line-height:1.45">\u201c${esc(dupe.title)}\u201d ${G("is already bound in the grimoire.", "is already in your saved recipes.")}</p>
+    <div class="actions">
+      <button class="btn btn-sky" id="dupeOpen" style="font-size:13px;padding:8px">${G("Show me the binding", "Open the saved one")}</button>
+      <button class="btn btn-dark" id="dupeAnyway" ${parsing ? "disabled" : ""} style="font-size:13px;padding:8px">${G("Bind it twice anyway", "Save it anyway")}</button>
+    </div>
+    <button class="ic" id="dupeCancel" style="font-size:13px;margin-top:8px">Keep editing</button>
+  </div>`;
+}
+
+// Same check, run before the tap rather than after: a recipe that's already
+// saved says so next to the Save button, so nobody has to be told "no" at all.
+function alreadySavedHint(title, source_url) {
+  if (dupe) return "";   // the notice below is saying it louder already
+  const hit = findDuplicateRecipe(saved, { title, source_url });
+  if (!hit) return "";
+  return `<p class="meta" style="margin-top:6px">${G("\u26a1 Already bound as", "Already saved as")} \u201c${esc(hit.title)}\u201d \u2014 ${G("binding again makes a second copy.", "saving makes a second copy.")}</p>`;
+}
+
 function recipeView() {
   const seg = (m, label) =>
     `<button class="segbtn ${recipeMode === m ? "active" : ""}" data-mode="${m}" style="flex:1;border:0;background:none;padding:8px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;${recipeMode === m ? "background:var(--raised);color:var(--text-strong);box-shadow:var(--shadow-sm)" : "color:var(--muted)"}">${label}</button>`;
@@ -818,7 +844,9 @@ function recipeView() {
         style="height:130px;margin-bottom:12px">${esc(manualDirections)}</textarea>
       <button class="btn btn-green" id="mSave" ${parsing ? "disabled" : ""}>
         ${parsing ? "Saving…" : "Save recipe"}</button>
+      ${alreadySavedHint(manualName, "")}
       ${err ? `<p class="err">${esc(err)}</p>` : ""}
+      ${dupeNotice()}
       <p class="meta" style="margin-top:8px;text-align:center">Ingredient amounts get sized for shopping automatically, same as an imported recipe.</p>`;
     return html;
   }
@@ -869,6 +897,7 @@ function recipeView() {
           style="flex:1;border:1px solid var(--border-strong);border-radius:8px;padding:6px 8px;font-size:13px;font-weight:600" />
         <button class="btn btn-sky" id="save" style="width:auto;padding:5px 12px;font-size:12px">${G("Bind", "Save")}</button>
       </div>
+      <div style="padding:0 12px">${alreadySavedHint(parsedTitle, parsedSource)}${dupeNotice()}</div>
       <div class="meta" style="padding:8px 12px 0;font-weight:600">INGREDIENTS — edit, remove, or add below</div>`;
     parsed.forEach((p, i) => {
       const batches = pantry.filter(x => norm(x.name) === norm(p.name));
@@ -2021,7 +2050,7 @@ function pantryView() {
 
 function wire() {
   document.querySelectorAll("[data-mode]").forEach(b => b.onclick = () => {
-    recipeMode = b.dataset.mode; err = ""; render();
+    recipeMode = b.dataset.mode; err = ""; dupe = null; render();
   });
   const mn = $("#mName"); if (mn) mn.oninput = e => manualName = e.target.value;
   const mi = $("#mIng"); if (mi) mi.oninput = e => manualIngredients = e.target.value;
@@ -2066,6 +2095,9 @@ function wire() {
   const tla = $("#toListAll"); if (tla) tla.onclick = () => addToListEdited(true);
   const ck = $("#cook"); if (ck) ck.onclick = () => cookEdited();
   const sv = $("#save"); if (sv) sv.onclick = saveRecipe;
+  const dop = $("#dupeOpen"); if (dop) dop.onclick = openDupe;
+  const dan = $("#dupeAnyway"); if (dan) dan.onclick = saveDupeAnyway;
+  const dcx = $("#dupeCancel"); if (dcx) dcx.onclick = () => { dupe = null; render(); };
 
   // plan tab
   const plPrev = $("#planPrev"); if (plPrev) plPrev.onclick = () => { planWeekStart = addDays(planWeekStart, -7); planAddDay = null; loadMeals(); };
@@ -2368,7 +2400,7 @@ async function applyPantryUse() {
 
 async function extract({ recipe, url }) {
   if (!recipe?.trim() && !url?.trim()) return;
-  parsing = true; err = ""; parsed = null; render();
+  parsing = true; err = ""; parsed = null; dupe = null; render();
   try {
     const r = await api("/parse", J({ m: "POST", b: url?.trim() ? { url } : { recipe } }));
     if (r.error) throw new Error(r.error);
@@ -2525,17 +2557,57 @@ async function readPhotoPages() {
   }
 }
 
+// One door for both save paths. The server owns the duplicate rule, so a save
+// is simply attempted; a 409 comes back as { duplicate }, which gets parked in
+// `dupe` along with everything needed to push it through or to finish the save
+// normally once the cook has decided. Returns whether the recipe went in.
+async function saveIfNew(body, done, force = false) {
+  const r = await api("/recipes", J({ m: "POST", b: force ? { ...body, allow_duplicate: true } : body }));
+  if (r && r.duplicate) { dupe = { ...r.duplicate, body, done }; return false; }
+  if (r && r.error) throw new Error(r.error);
+  dupe = null;
+  await done();
+  return true;
+}
+
+// "Save it anyway" — the same body, with the duplicate check waived.
+async function saveDupeAnyway() {
+  if (!dupe) return;
+  const { body, done } = dupe;
+  parsing = true; err = ""; render();
+  try {
+    await saveIfNew(body, done, true);
+  } catch (e) {
+    err = e && e.message ? e.message : "Couldn't save the recipe.";
+  } finally {
+    parsing = false;
+    render();   // done() painted the saved tab while this still said "Saving…"
+  }
+}
+
+// "Open the saved one" — jump to the recipe that's already in the book.
+async function openDupe() {
+  if (!dupe) return;
+  const r = await api(`/recipes/${dupe.id}`);
+  dupe = null;
+  if (r && r.error) { err = r.error; render(); return; }
+  viewing = r; servings = 1; cookStep = -1; showPhotos = false; shareOpen = false; shareMsg = ""; err = "";
+  tab = "saved";
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "saved"));
+  render();
+}
+
 async function saveManualRecipe() {
   if (!manualName.trim()) { err = "Give the recipe a name."; render(); return; }
   if (!manualIngredients.trim()) { err = "Add at least one ingredient."; render(); return; }
-  parsing = true; err = ""; render();
+  parsing = true; err = ""; dupe = null; render();
   try {
     // Run the ingredient list through the parser to get shopping/pantry data.
     const r = await api("/parse", J({ m: "POST", b: { recipe: `TITLE: ${manualName}\n\nINGREDIENTS:\n${manualIngredients}` } }));
     if (r.error) throw new Error(r.error);
     if (!r.items || r.items.length === 0) throw new Error("Couldn't read those ingredients. Check the formatting.");
     const steps = manualDirections.split("\n").map(s => s.trim()).filter(Boolean);
-    await api("/recipes", J({ m: "POST", b: {
+    await saveIfNew({
       title: manualName.trim(),
       source_url: "",
       ingredients: r.items,
@@ -2543,12 +2615,14 @@ async function saveManualRecipe() {
       nutrition: r.nutrition || null,
       prep_min: r.prep_min || 0,
       cook_min: r.cook_min || 0,
-    }}));
-    manualName = ""; manualIngredients = ""; manualDirections = "";
-    await refresh();
-    tab = "saved"; viewing = null; recipeMode = "import";
-    document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "saved"));
-    render();
+    }, async () => {
+      manualName = ""; manualIngredients = ""; manualDirections = "";
+      await refresh();
+      tab = "saved"; viewing = null; recipeMode = "import";
+      document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "saved"));
+      render();
+    });
+    if (dupe) render();   // not saved — the notice asks what to do about it
   } catch (e) {
     err = e && e.message ? e.message : "Couldn't save the recipe.";
   } finally {
@@ -2564,7 +2638,7 @@ async function shareRecipe() {
   const r = await api(`/recipes/${viewing.id}/share`, J({ m: "POST", b: { username } }));
   if (r.error) { shareMsg = r.error; shareMsgTone = "var(--danger-ink)"; render(); return; }
   shareMsg = r.duplicate
-    ? `Sent to ${r.to} (they already had one with this name, so now they have both).`
+    ? `${r.to} already has “${r.title}” — nothing sent, so their book stays tidy.`
     : `Sent to ${r.to} — it's in their saved recipes.`;
   shareMsgTone = "var(--accent-ink)";
   shareOpen = true; // keep the panel open to show the confirmation
@@ -2573,21 +2647,28 @@ async function shareRecipe() {
 
 async function saveRecipe() {
   if (!(await reparseIfDirty())) { render(); return; }
-  await api("/recipes", J({ m: "POST", b: {
-    title: parsedTitle || "Untitled recipe",
-    source_url: parsedSource,
-    ingredients: parsed.filter(p => p.use !== false).map(({ use, ...rest }) => rest),
-    steps: parsedSteps,
-    nutrition: parsedNutrition,
-    photos: parsedPhotos,
-    prep_min: parsedPrep,
-    cook_min: parsedCook,
-  }}));
-  await refresh();
-  tab = "saved"; viewing = null;
-  parsedPhotos = [];
-  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "saved"));
-  render();
+  err = "";
+  try {
+    await saveIfNew({
+      title: parsedTitle || "Untitled recipe",
+      source_url: parsedSource,
+      ingredients: parsed.filter(p => p.use !== false).map(({ use, ...rest }) => rest),
+      steps: parsedSteps,
+      nutrition: parsedNutrition,
+      photos: parsedPhotos,
+      prep_min: parsedPrep,
+      cook_min: parsedCook,
+    }, async () => {
+      await refresh();
+      tab = "saved"; viewing = null;
+      parsedPhotos = [];
+      document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "saved"));
+      render();
+    });
+  } catch (e) {
+    err = e && e.message ? e.message : "Couldn't save the recipe.";
+  }
+  if (dupe || err) render();
 }
 
 async function addToList(items, ignoreStock = false) {
