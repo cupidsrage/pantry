@@ -134,6 +134,31 @@ the project for that reason.
 If you fall behind, **Push dinner later** moves the whole schedule rather than
 leaving every remaining step marked late.
 
+## One copy of each recipe
+
+A recipe book fills up with the same dish twice more easily than it sounds: Save
+gets double-tapped, a link that was imported in March gets imported again in
+August, or something typed in by hand turns out to already be there. Saving
+checks the book first and stops rather than filing a second copy.
+
+Two recipes are the same one when either their titles match — ignoring case,
+punctuation, accents and a leading "the" — or they came from the same page,
+which is compared with the protocol, `www.`, trailing slash, `#anchor` and
+campaign parameters stripped, so a link shared from Pinterest matches the same
+link typed in plainly. A matching URL counts even when the titles differ, since
+sites rename recipes.
+
+Two different dishes really can share a name, so nothing is ever refused
+outright: the save is held and you're offered the recipe you already have, or
+**Save it anyway** to keep both. The parsed recipe card also says "Already saved
+as…" next to the Save button, so most of the time the question never comes up.
+Sharing a recipe to someone who already has it is skipped rather than copied,
+and the sender is told.
+
+The matching itself is `findDuplicateRecipe()` in `lib/recipes.js`, which both
+sides run — the server to refuse the insert, the page to warn before you press
+Save — so the warning and the refusal can't disagree.
+
 ## Cook & thaw reminders (optional)
 
 The Plan tab already works out when to start cooking and when to pull something

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { recipeCoverage, recipeSoonestExpiry, recipeMatch } from "../lib/recipes.js";
+import { recipeCoverage, recipeSoonestExpiry, recipeMatch, recipeKey, recipeSourceKey, findDuplicateRecipe } from "../lib/recipes.js";
 
 const DAY = 86400000;
 const NOW = new Date(2026, 7, 3, 12, 0, 0).getTime();
@@ -91,4 +91,84 @@ test("every word typed has to match something", () => {
 
 test("a word found in the title contributes no 'has' hint", () => {
   assert.equal(recipeMatch(parm, "chicken").via, "", "title match, not an ingredient find");
+});
+
+// ---------- duplicates ----------
+
+const book = [
+  { id: 1, title: "Chicken Parm", source_url: "https://www.allrecipes.com/recipe/8805/chicken-parm/" },
+  { id: 2, title: "Weeknight Dal", source_url: "" },
+];
+
+test("the same title saved again is a duplicate, however it's typed", () => {
+  for (const title of ["Chicken Parm", "chicken parm", "  CHICKEN   PARM  ", "Chicken Parm!", "The Chicken Parm"]) {
+    const hit = findDuplicateRecipe(book, { title, source_url: "" });
+    assert.equal(hit && hit.id, 1, `"${title}" should have found the saved one`);
+  }
+});
+
+test("the title key keeps the words that name the dish", () => {
+  assert.equal(recipeKey("  The Best-Ever Chicken Parm!  "), "best ever chicken parm");
+  assert.equal(recipeKey(""), "");
+  assert.equal(recipeKey(undefined), "");
+});
+
+test("accents don't hide a duplicate", () => {
+  const saved = [{ id: 7, title: "Sauté Potatoes" }];
+  assert.equal(findDuplicateRecipe(saved, { title: "Saute Potatoes" }).id, 7);
+});
+
+test("a genuinely new recipe is not a duplicate", () => {
+  assert.equal(findDuplicateRecipe(book, { title: "Chicken Parm Sandwich" }), null);
+  assert.equal(findDuplicateRecipe([], { title: "Chicken Parm" }), null);
+});
+
+test("an untitled recipe with no source matches nothing", () => {
+  // Otherwise every blank-titled save would collide with the last blank one.
+  assert.equal(findDuplicateRecipe([{ id: 3, title: "" }], { title: "" }), null);
+  assert.equal(findDuplicateRecipe(book, {}), null);
+});
+
+test("the same page saved twice is a duplicate even when the title changed", () => {
+  // Sites rename recipes; the URL still points at the one dish.
+  const hit = findDuplicateRecipe(book, {
+    title: "Best Ever Chicken Parmesan",
+    source_url: "http://allrecipes.com/recipe/8805/chicken-parm",
+  });
+  assert.equal(hit && hit.id, 1);
+});
+
+test("a link's tracking noise is not a difference", () => {
+  const hit = findDuplicateRecipe(book, {
+    title: "Something Else",
+    source_url: "https://allrecipes.com/recipe/8805/chicken-parm/?utm_source=pinterest&fbclid=abc#ingredients",
+  });
+  assert.equal(hit && hit.id, 1);
+});
+
+test("a different page with the same host is not a duplicate", () => {
+  assert.equal(findDuplicateRecipe(book, {
+    title: "Something Else",
+    source_url: "https://www.allrecipes.com/recipe/9999/lasagne/",
+  }), null);
+});
+
+test("a blank source_url never matches the recipes that have none", () => {
+  // Dal has no URL; a new recipe with no URL must fall through to the title.
+  const hit = findDuplicateRecipe(book, { title: "Weeknight Dal", source_url: "" });
+  assert.equal(hit && hit.id, 2);
+  assert.equal(findDuplicateRecipe(book, { title: "Brand New Thing", source_url: "" }), null);
+});
+
+test("source keys ignore protocol, www, and a trailing slash", () => {
+  const a = recipeSourceKey("https://www.example.com/r/1/");
+  assert.equal(a, recipeSourceKey("http://example.com/r/1"));
+  assert.equal(recipeSourceKey(""), "");
+  assert.equal(recipeSourceKey(null), "");
+});
+
+test("source keys keep query params that pick the page", () => {
+  assert.notEqual(recipeSourceKey("example.com/r?id=1"), recipeSourceKey("example.com/r?id=2"));
+  // order of params is not a difference
+  assert.equal(recipeSourceKey("example.com/r?b=2&a=1"), recipeSourceKey("example.com/r?a=1&b=2"));
 });
