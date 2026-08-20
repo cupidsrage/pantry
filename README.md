@@ -32,7 +32,10 @@ Runs `node --test` — no framework, no dev dependencies.
 The logic worth testing is the arithmetic: unit conversion, expiry day
 boundaries, drawing down pantry batches oldest-first, matching item names,
 recipe coverage, spend aggregation, reminder timing, reading durations out of
-recipe steps, and interleaving several recipes into one cooking schedule. All of
+recipe steps, interleaving several recipes into one cooking schedule, deciding
+what's about to go off and what to cook with it, checking a leftover night
+against the pot it claims to come from, and merging a restored backup into an
+account that isn't empty. All of
 it lives in `lib/`, which the server imports directly and the browser loads from
 `/lib`, so there is one copy of each rule rather than one per side. That matters
 most for `norm()` in `lib/units.js` — the browser uses it to decide whether a
@@ -79,6 +82,37 @@ chicken appears to cover both Monday and Thursday and you come home short.
 This is the one feature that runs on Sonnet rather than Haiku — it's weighing
 expiry against variety against time against budget, which is reasoning rather
 than extraction. It runs about once a week, so the difference is negligible.
+
+## Cook once, eat twice
+
+A pot of chilli that feeds four is barely more work than one that feeds two, and
+the second night is free. The plan knows that now.
+
+Any night on the **Plan** tab can be cooked in a batch — pick a recipe and say
+how many nights it's for, up to four. The shopping list buys the ingredients
+once, multiplied: a double batch is 400g of lentils on one line, not 200g twice.
+A later night in the same week can then be marked as leftovers instead of a
+meal, and it costs nothing — nothing to buy, nothing to cook, no "start cooking"
+reminder, no thawing. The cook night says which nights it also feeds; the
+leftover night says which pot it came from.
+
+The offer only appears where it's real. A recipe that isn't cooked earlier in
+the week has no leftovers to eat, and a batch that's already spoken for can't
+stretch further, so the checkbox simply isn't there. Both the page and the
+server check that — the server owns the plan, and another phone may have changed
+the week since this one drew it.
+
+**Plan my week** uses it too. It's told to batch the things worth batching —
+stews, braises, roasts, big grains — and to spend the leftovers on the nights
+your constraints say are short on time, since a leftover night beats even the
+fastest recipe when it takes no time at all. Things that don't reheat well are
+left alone. The review panel then reports the honest number: *5 nights at the
+stove for 7 dinners*.
+
+The rules live in `normalizeProposal()` and `cookedRecipes()` in
+`lib/planner.js`, so a hallucinated leftover night — one whose meal is never
+cooked, or is cooked afterwards, or was only ever a single portion — is dropped
+with a reason before it can become a row.
 
 ## Cook together
 
@@ -159,11 +193,14 @@ The matching itself is `findDuplicateRecipe()` in `lib/recipes.js`, which both
 sides run — the server to refuse the insert, the page to warn before you press
 Save — so the warning and the refusal can't disagree.
 
-## Cook & thaw reminders (optional)
+## Reminders (optional)
 
 The Plan tab already works out when to start cooking and when to pull something
 out of the freezer. Turn these on and they arrive as phone notifications instead
 of waiting for you to open the app.
+
+Three kinds arrive: **start cooking**, **take something out to thaw**, and a
+once-a-day **use it up** digest (see below) at 9am local time.
 
 1. Generate a keypair:
    ```
@@ -180,6 +217,53 @@ unset and the whole feature stays hidden — nothing else changes.
 
 > Keep the keypair. Regenerating it invalidates every existing subscription, and
 > everyone has to tap **Turn on** again.
+
+## Use it up
+
+Food goes off in the back of a fridge because nothing ever mentions it. The
+**Pantry** tab now leads with whatever is about to turn — what it is, how long
+is left, and which of your saved recipes would use it up tonight. Tap one and it
+opens.
+
+If you've turned reminders on, the same thing arrives once a day at 9am, wherever
+you are: *spinach — 2d left · you could make Spinach Soup tonight*.
+
+Three things keep it from becoming noise:
+
+- **It only speaks when there's something to say.** Nothing expiring, no strip
+  and no notification.
+- **It ignores food the week already accounts for.** If Thursday's dinner uses
+  the chicken, that decision has been made, and being reminded of it is how a
+  reminder becomes something you swipe away without reading.
+- **It only promises what the pantry can deliver.** A recipe you could cook
+  tonight is offered as tonight's dinner; one that needs a shop is offered as an
+  idea.
+
+Just-expired stock is still mentioned for a day — it may well be fine, and it's
+the last moment to look — but last month's is not. The window is three days
+ahead, which is far enough to plan a meal around and near enough to matter.
+
+The strip and the notification both come from `expiryDigest()` in
+`lib/waste.js`, so what the page says and what your phone says can't disagree.
+
+## Backing up your data
+
+All of this lives in one SQLite file on one server's disk. **⬇ Download a
+backup** at the bottom of the Pantry tab writes the lot to a JSON file you keep
+— every recipe, your pantry, the list, the plan, and your price history — in
+readable JSON rather than a database dump.
+
+**⬆ Restore** reads one back. It says what it would do before it does anything,
+and it only ever adds: a recipe already in the book is left alone, stock isn't
+doubled, and history isn't duplicated. Restoring the same file twice changes
+nothing the second time, which means restoring into an account that's half
+re-typed does the sensible thing rather than leaving you with two of everything.
+Recipes are matched the same way the Save button matches them, and a restored
+meal is re-linked to its recipe by title, since ids from another database mean
+nothing here.
+
+The matching rules are `planRestore()` in `lib/backup.js`, and they're tested
+against a full round trip.
 
 ## Scanning barcodes
 

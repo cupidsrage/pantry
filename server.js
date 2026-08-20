@@ -10,10 +10,12 @@ import { norm } from "./lib/units.js";
 import { planConsumption } from "./lib/pantry.js";
 import { expiryLabel } from "./lib/expiry.js";
 import { summarizeSpend } from "./lib/spend.js";
-import { mealTimes, thawAtMs, isDue, REMINDER_WINDOW_MS } from "./lib/schedule.js";
-import { weekDates, normalizeProposal, summarizePlan } from "./lib/planner.js";
+import { eatAtMs, mealTimes, thawAtMs, isDue, localDay, REMINDER_WINDOW_MS } from "./lib/schedule.js";
+import { weekDates, normalizeProposal, summarizePlan, cookedRecipes, batchSize } from "./lib/planner.js";
 import { planShoppingList, estimateListCost } from "./lib/shopping.js";
 import { findDuplicateRecipe } from "./lib/recipes.js";
+import { expiryDigest, DIGEST_HOUR } from "./lib/waste.js";
+import { readBackup, planRestore, describeRestore, BACKUP_VERSION } from "./lib/backup.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -111,6 +113,9 @@ db.exec(`
     meal_time TEXT DEFAULT '',   -- 'HH:MM' target time to eat (optional)
     recipe_id INTEGER,           -- saved recipe, or null for a free-text note
     title TEXT NOT NULL,         -- snapshot of the recipe title (survives recipe deletion)
+    kind TEXT NOT NULL DEFAULT 'cook',  -- 'cook' (made that night) or 'leftover'
+    servings REAL NOT NULL DEFAULT 1,   -- nights this cook feeds; 1 on a leftover night
+    cook_date TEXT DEFAULT '',   -- on a leftover night, the day it was cooked
     created INTEGER NOT NULL
   );
 `);
@@ -184,6 +189,12 @@ function migrate() {
   if (!pc.includes("added")) db.exec(`ALTER TABLE pantry ADD COLUMN added INTEGER DEFAULT 0`);
   if (!pc.includes("storage")) db.exec(`ALTER TABLE pantry ADD COLUMN storage TEXT DEFAULT ''`);
   if (!pc.includes("shelf_life")) db.exec(`ALTER TABLE pantry ADD COLUMN shelf_life TEXT DEFAULT ''`);
+  // meal_plan: cook-once-eat-twice. An existing row is a night that cooks for
+  // itself, which is what the defaults say.
+  const mc = columns("meal_plan");
+  if (!mc.includes("kind")) db.exec(`ALTER TABLE meal_plan ADD COLUMN kind TEXT NOT NULL DEFAULT 'cook'`);
+  if (!mc.includes("servings")) db.exec(`ALTER TABLE meal_plan ADD COLUMN servings REAL NOT NULL DEFAULT 1`);
+  if (!mc.includes("cook_date")) db.exec(`ALTER TABLE meal_plan ADD COLUMN cook_date TEXT DEFAULT ''`);
   // multi-user: tag each data row with its owner. Existing rows default to
   // user_id 0 ("unclaimed"); the first account created adopts them all.
   for (const t of ["pantry", "list", "recipes"]) {
@@ -1181,8 +1192,28 @@ app.post("/api/meals", requireAuth, (req, res) => {
     title = r.title;
   }
   if (!title) return res.status(400).json({ error: "a recipe or a meal name is required" });
-  const info = db.prepare("INSERT INTO meal_plan (user_id,date,meal_time,recipe_id,title,created) VALUES (?,?,?,?,?,?)")
-    .run(req.userId, date, meal_time, recipe_id, title, Date.now());
+
+  // A leftover night eats an earlier cook's spare portions, so it needs one to
+  // point at: a night that cooked this same recipe, before this one, with more
+  // portions than it ate itself.
+  const wantsLeftover = String(req.body.kind || "") === "leftover";
+  let kind = "cook", servings = batchSize(req.body.servings), cook_date = "";
+  if (wantsLeftover) {
+    if (!recipe_id) return res.status(400).json({ error: "leftovers have to be leftovers of a saved recipe" });
+    const source = db.prepare(
+      "SELECT date, servings FROM meal_plan WHERE user_id=? AND recipe_id=? AND kind='cook' AND date<? ORDER BY date DESC"
+    ).get(req.userId, recipe_id, date);
+    if (!source) return res.status(400).json({ error: `${title} isn't cooked on an earlier day` });
+    const eaten = db.prepare(
+      "SELECT COUNT(*) AS n FROM meal_plan WHERE user_id=? AND recipe_id=? AND kind='leftover' AND cook_date=?"
+    ).get(req.userId, recipe_id, source.date).n;
+    if (eaten >= batchSize(source.servings) - 1)
+      return res.status(400).json({ error: `that batch of ${title} is already spoken for — cook a bigger one` });
+    kind = "leftover"; servings = 1; cook_date = source.date;
+  }
+
+  const info = db.prepare("INSERT INTO meal_plan (user_id,date,meal_time,recipe_id,title,kind,servings,cook_date,created) VALUES (?,?,?,?,?,?,?,?,?)")
+    .run(req.userId, date, meal_time, recipe_id, title, kind, servings, cook_date, Date.now());
   res.json({ id: info.lastInsertRowid });
 });
 app.patch("/api/meals/:id", requireAuth, (req, res) => {
@@ -1256,7 +1287,7 @@ function constraintLines(c = {}) {
     out.push(`- Monday to Friday, nothing that takes longer than ${Number(c.maxWeeknightMin)} minutes total.`);
   if (Number(c.vegetarianNights) > 0)
     out.push(`- Exactly ${Number(c.vegetarianNights)} of the seven meals must be vegetarian (no meat, poultry or fish).`);
-  if (Number(c.skipDays) > 0) out.push(`- Leave ${Number(c.skipDays)} day(s) unplanned for leftovers or eating out.`);
+  if (Number(c.skipDays) > 0) out.push(`- Leave ${Number(c.skipDays)} day(s) with no meal at all — eating out, or eating elsewhere.`);
   if (c.notes) out.push(`- ${String(c.notes).slice(0, 300)}`);
   return out.length ? out.join("\n") : "- None beyond the general rules.";
 }
@@ -1265,18 +1296,28 @@ const PLAN_PROMPT = ({ days, recipes, pantry, recent, constraints }) =>
 `Plan a week of dinners for one household. Choose ONLY from the saved recipes listed below, by their id.
 
 Return ONLY MINIFIED JSON, no prose, no markdown:
-{"days":[{"d":"YYYY-MM-DD","r":recipe_id,"t":"HH:MM","why":"short reason"}],"note":"one sentence about the week"}
+{"days":[{"d":"YYYY-MM-DD","r":recipe_id,"k":"cook"|"leftover","b":batch,"t":"HH:MM","why":"short reason"}],"note":"one sentence about the week"}
 
 Rules, in priority order:
 1. Use up pantry stock that expires soonest. This matters more than anything else — food about to go off should drive the plan.
 2. Prefer recipes the pantry already covers, so the shopping trip stays small.
-3. Don't repeat a recipe within the week, and avoid anything in RECENTLY EATEN unless the pantry strongly favours it.
+3. Don't cook the same recipe twice in the week, and avoid anything in RECENTLY EATEN unless the pantry strongly favours it.
 4. Vary the protein and the style night to night. Don't serve chicken four times.
 5. Obey every constraint exactly.
 
 One meal per day, every day, unless a constraint says otherwise. If a day genuinely shouldn't have a meal, leave it out.
 t: when to eat, 24-hour "HH:MM". Use 18:00 unless a constraint suggests otherwise.
-why: at most 12 words, the real reason ("uses spinach expiring Tue", "quick after work", "vegetarian night").
+why: at most 12 words, the real reason ("uses spinach expiring Tue", "quick after work", "second night of Sunday's chilli").
+
+LEFTOVERS — cook once, eat twice:
+k is "cook" (made that night) or "leftover" (eating an earlier night's spare portions). Leave k out for a normal cooked night.
+b is how many nights ONE cook feeds, 1 to 4. b:2 means a double batch: that night plus one more.
+A "leftover" day must name the SAME recipe id as a "cook" day EARLIER in the week whose b left room for it — b:2 gives one leftover night, b:3 gives two. A leftover day needs no b.
+Use this where it genuinely helps, not everywhere:
+- Long-cooking dishes worth making once — stews, braises, chilli, soup, roasts, curry, bakes, big grains.
+- Weeknights the constraints say are short on time. Leftovers take no cooking at all, so they beat a fast recipe on the worst night of the week.
+- Leave a night or two between a cook and its leftovers rather than the same dish twice running, and don't stretch one dish past three nights.
+Things that don't keep or reheat — crisp things, fried fish, salads, pasta dressed to order, anything at its best straight out of the pan — should be cooked fresh, b:1.
 
 WEEK:
 ${days.map((d) => `${d} (${WEEKDAY[new Date(d + "T00:00:00Z").getUTCDay()]})`).join("\n")}
@@ -1323,8 +1364,9 @@ app.post("/api/plan/generate", requireAuth, async (req, res) => {
     return res.status(422).json({ error: "The planner didn't return anything usable. Try again." });
 
   // What this plan would cost you at the shop, and what it needs you to buy.
-  const chosen = meals.map((m) => recipes.find((r) => r.id === m.recipe_id)).filter(Boolean);
-  const shopping = planShoppingList(chosen, pantry);
+  // Cook nights only, scaled to their batch — a leftover night's food was
+  // bought once already, on the night it was cooked.
+  const shopping = planShoppingList(cookedRecipes(meals, recipes), pantry);
   const purchases = db.prepare("SELECT name,price,packages FROM purchases WHERE user_id=?").all(req.userId);
 
   res.json({
@@ -1358,14 +1400,14 @@ app.post("/api/plan/apply", requireAuth, (req, res) => {
     if (replace)
       db.prepare("DELETE FROM meal_plan WHERE user_id=? AND date>=? AND date<=?")
         .run(req.userId, days[0], days[6]);
-    const ins = db.prepare("INSERT INTO meal_plan (user_id,date,meal_time,recipe_id,title,created) VALUES (?,?,?,?,?,?)");
-    for (const m of meals) ins.run(req.userId, m.date, m.meal_time, m.recipe_id, m.title, Date.now());
+    const ins = db.prepare("INSERT INTO meal_plan (user_id,date,meal_time,recipe_id,title,kind,servings,cook_date,created) VALUES (?,?,?,?,?,?,?,?,?)");
+    for (const m of meals)
+      ins.run(req.userId, m.date, m.meal_time, m.recipe_id, m.title, m.kind, m.servings, m.cook_date, Date.now());
 
     if (!addToList) return { added: 0 };
     const pantry = db.prepare("SELECT * FROM pantry WHERE user_id=?").all(req.userId);
-    const chosen = meals.map((m) => recipes.find((r) => r.id === m.recipe_id)).filter(Boolean);
     let added = 0;
-    for (const item of planShoppingList(chosen, pantry)) {
+    for (const item of planShoppingList(cookedRecipes(meals, recipes), pantry)) {
       // Merge into an existing line rather than making a second one.
       const existing = db.prepare("SELECT * FROM list WHERE user_id=?").all(req.userId)
         .find((l) => norm(l.name) === norm(item.name));
@@ -1525,6 +1567,9 @@ function dueReminders(userId, tzOffset, now) {
 
   for (const m of meals) {
     if (!m.meal_time || !m.recipe_id) continue;
+    // Leftovers are reheated, not cooked: no start time to warn about, and the
+    // freezer was raided days ago.
+    if (m.kind === "leftover") continue;
     const r = db.prepare("SELECT * FROM recipes WHERE id=? AND user_id=?").get(m.recipe_id, userId);
     if (!r) continue;
     // The stored date/time is local to the shopper; tz_offset converts it to real time.
@@ -1563,6 +1608,44 @@ function dueReminders(userId, tzOffset, now) {
   return out;
 }
 
+// The once-a-day "this is about to go off" nudge.
+//
+// Meal reminders fire at a moment the meal itself decides. This one has no such
+// moment, so it gets one: 9am where the shopper is, once, whether or not
+// anything is planned. The key is the local date, so a phone that changes
+// timezone mid-week still gets exactly one a day.
+function expiryReminder(userId, tzOffset, now) {
+  const today = localDay(now, tzOffset);
+  const at = eatAtMs(today, DIGEST_HOUR, tzOffset);
+  if (at == null || !isDue(at, now, REMINDER_WINDOW_MS)) return null;
+
+  const pantry = db.prepare("SELECT * FROM pantry WHERE user_id=?").all(userId)
+    .map((p) => ({ ...p, shelf_life: p.shelf_life ? JSON.parse(p.shelf_life) : null }));
+  if (!pantry.length) return null;
+  const recipes = db.prepare("SELECT id,title,ingredients FROM recipes WHERE user_id=?").all(userId)
+    .map((r) => ({ ...r, ingredients: JSON.parse(r.ingredients || "[]") }));
+
+  // Anything a meal in the week ahead already uses is a decision that's been
+  // made. The digest is for food nothing is going to happen to.
+  const planned = [];
+  const upcoming = db.prepare("SELECT recipe_id FROM meal_plan WHERE user_id=? AND date>=? AND date<=?")
+    .all(userId, today, localDay(now + 7 * 86400000, tzOffset));
+  for (const m of upcoming) {
+    const r = recipes.find((x) => x.id === m.recipe_id);
+    if (r) for (const ing of r.ingredients) planned.push(ing.name);
+  }
+
+  const digest = expiryDigest({ pantry, recipes, planned, now });
+  if (!digest) return null;
+  return {
+    key: `expiry:${today}`,
+    at,
+    title: digest.title,
+    body: digest.body,
+    tag: "expiry",
+  };
+}
+
 async function runReminderSweep() {
   if (!pushEnabled()) return;
   const now = Date.now();
@@ -1576,6 +1659,13 @@ async function runReminderSweep() {
     } catch (e) {
       console.error("[push] reminder build failed:", e.message);
       continue;
+    }
+    try {
+      const digest = expiryReminder(u.user_id, u.tz_offset, now);
+      if (digest) due.push(digest);
+    } catch (e) {
+      // A broken digest must not cost someone their "start cooking" reminder.
+      console.error("[push] expiry digest failed:", e.message);
     }
     for (const rem of due) {
       if (!isDue(rem.at, now, REMINDER_WINDOW_MS)) continue;
@@ -1598,7 +1688,116 @@ if (pushEnabled()) {
   console.log("[push] reminders off — set VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY to turn them on (npm run vapid)");
 }
 
-const PORT = process.env.PORT || 3000;
+// ---------- export & restore ----------
+// All of this lives in one SQLite file on one disk. A recipe book worth two
+// years of typing shouldn't depend on that disk still being there, so it can be
+// downloaded whole and put back.
+//
+// The JSON goes out in the shape the tables are in, minus the ids and the
+// user_id — ids are meaningless in someone else's database, and an import
+// re-links a meal to its recipe by title instead.
+app.get("/api/export", requireAuth, (req, res) => {
+  const rows = (sql) => db.prepare(sql).all(req.userId);
+  const payload = {
+    app: "pantry-list",
+    version: BACKUP_VERSION,
+    exported: Date.now(),
+    // The JSON columns go out parsed, so the file is readable and portable
+    // rather than JSON wrapped in strings. The import side takes either.
+    recipes: rows("SELECT title,source_url,ingredients,steps,nutrition,photos,prep_min,cook_min,created FROM recipes WHERE user_id=? ORDER BY created")
+      .map((r) => ({ ...r, ingredients: parseJson(r.ingredients, []), steps: parseJson(r.steps, []),
+        nutrition: parseJson(r.nutrition, null), photos: parseJson(r.photos, []) })),
+    pantry: rows("SELECT name,base,base_unit,pkg_label,pkg_base,added,storage,shelf_life FROM pantry WHERE user_id=? ORDER BY id")
+      .map((p) => ({ ...p, shelf_life: parseJson(p.shelf_life, null) })),
+    list: rows("SELECT name,packages,base_unit,pkg_label,pkg_base,checked FROM list WHERE user_id=? ORDER BY id"),
+    meals: rows("SELECT date,meal_time,title,kind,servings,cook_date,created FROM meal_plan WHERE user_id=? ORDER BY date"),
+    purchases: rows("SELECT name,price,packages,ym,bought,source FROM purchases WHERE user_id=? ORDER BY bought"),
+  };
+  const day = new Date().toISOString().slice(0, 10);
+  res.setHeader("Content-Disposition", `attachment; filename="pantry-backup-${day}.json"`);
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.send(JSON.stringify(payload, null, 2));
+});
+
+// Read a backup back in. Two-step by design: `dryRun` says what would happen,
+// so the confirmation the user is given is the real answer rather than a guess.
+app.post("/api/import", requireAuth, (req, res) => {
+  const { data, error } = readBackup(req.body && req.body.backup);
+  if (error) return res.status(400).json({ error });
+
+  const mode = req.body.mode === "replace" ? "replace" : "merge";
+  const existing = {
+    recipes: db.prepare("SELECT id,title,source_url FROM recipes WHERE user_id=?").all(req.userId),
+    pantry: db.prepare("SELECT name,added FROM pantry WHERE user_id=?").all(req.userId),
+    list: db.prepare("SELECT name FROM list WHERE user_id=?").all(req.userId),
+    meals: db.prepare("SELECT date,title FROM meal_plan WHERE user_id=?").all(req.userId),
+    purchases: db.prepare("SELECT name,price,bought FROM purchases WHERE user_id=?").all(req.userId),
+  };
+  const plan = planRestore(data, existing, { mode });
+  const summary = describeRestore(plan);
+  if (req.body.dryRun) return res.json({ dryRun: true, mode, summary, counts: countsOf(plan) });
+
+  const now = Date.now();
+  db.transaction(() => {
+    if (plan.clear) {
+      for (const t of ["recipes", "pantry", "list", "meal_plan", "purchases"])
+        db.prepare(`DELETE FROM ${t} WHERE user_id=?`).run(req.userId);
+    }
+    for (const r of plan.add.recipes) {
+      db.prepare("INSERT INTO recipes (title,source_url,ingredients,steps,nutrition,photos,prep_min,cook_min,created,user_id) VALUES (?,?,?,?,?,?,?,?,?,?)")
+        .run(str(r.title), str(r.source_url), jsonText(r.ingredients, "[]"), jsonText(r.steps, "[]"),
+          jsonText(r.nutrition, ""), jsonText(r.photos, ""), int(r.prep_min), int(r.cook_min),
+          int(r.created) || now, req.userId);
+    }
+    for (const p of plan.add.pantry) {
+      db.prepare("INSERT INTO pantry (name,base,base_unit,pkg_label,pkg_base,added,storage,shelf_life,user_id) VALUES (?,?,?,?,?,?,?,?,?)")
+        .run(str(p.name), num(p.base), str(p.base_unit) || "count", str(p.pkg_label) || "each",
+          num(p.pkg_base) || 1, int(p.added), str(p.storage), jsonText(p.shelf_life, ""), req.userId);
+    }
+    for (const l of plan.add.list) {
+      db.prepare("INSERT INTO list (name,packages,base_unit,pkg_label,pkg_base,checked,user_id) VALUES (?,?,?,?,?,?,?)")
+        .run(str(l.name), num(l.packages) || 1, str(l.base_unit) || "count", str(l.pkg_label) || "each",
+          num(l.pkg_base) || 1, l.checked ? 1 : 0, req.userId);
+    }
+    // Meals point at a recipe by title, since the backup's ids mean nothing
+    // here. A meal whose recipe is gone keeps its title and reads as a note.
+    for (const m of plan.add.meals) {
+      const r = db.prepare("SELECT id FROM recipes WHERE user_id=? AND title=?").get(req.userId, str(m.title));
+      db.prepare("INSERT INTO meal_plan (user_id,date,meal_time,recipe_id,title,kind,servings,cook_date,created) VALUES (?,?,?,?,?,?,?,?,?)")
+        .run(req.userId, str(m.date).slice(0, 10), str(m.meal_time).slice(0, 5), r ? r.id : null,
+          str(m.title), m.kind === "leftover" ? "leftover" : "cook", batchSize(m.servings),
+          str(m.cook_date).slice(0, 10), int(m.created) || now);
+    }
+    for (const p of plan.add.purchases) {
+      db.prepare("INSERT INTO purchases (user_id,name,price,packages,ym,bought,source) VALUES (?,?,?,?,?,?,?)")
+        .run(req.userId, str(p.name), num(p.price), num(p.packages) || 1, str(p.ym),
+          int(p.bought) || now, str(p.source) || "backup");
+    }
+  })();
+
+  res.json({ ok: true, mode, summary, counts: countsOf(plan) });
+});
+
+const countsOf = (plan) => Object.fromEntries(
+  Object.keys(plan.add).map((k) => [k, { added: plan.add[k].length, skipped: plan.skipped[k] || 0 }]));
+
+// Restoring means writing a file the server didn't produce, so every field is
+// coerced to the type its column expects rather than trusted.
+const str = (v) => (v == null ? "" : String(v));
+const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+const int = (v) => Math.round(num(v));
+// JSON columns hold text. A backup carries them already parsed (they went out
+// through res.json) or, from an older file, still as strings.
+const parseJson = (v, fallback) => {
+  if (!v) return fallback;
+  try { return JSON.parse(v); } catch { return fallback; }
+};
+const jsonText = (v, fallback) => {
+  if (v == null || v === "") return fallback;
+  return typeof v === "string" ? v : JSON.stringify(v);
+};
+
 app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-08-03b" }));
 
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-08-03b]`));
