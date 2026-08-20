@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { weekDates, normalizeProposal, summarizePlan } from "../lib/planner.js";
+import { weekDates, normalizeProposal, summarizePlan, cookedRecipes, batchSize, MAX_BATCH } from "../lib/planner.js";
 
 const recipes = [
   { id: 1, title: "Chicken Parm", prep_min: 15, cook_min: 30, nutrition: { calories: 700, protein: 45 } },
@@ -37,6 +37,8 @@ test("a clean proposal comes through intact", () => {
   assert.deepEqual(meals, [{
     date: "2026-08-02", meal_time: "18:30", recipe_id: 1,
     title: "Chicken Parm", why: "uses the chicken",
+    // A day says nothing about batches unless it asks to: one night, cooked.
+    kind: "cook", servings: 1, cook_date: "",
   }]);
 });
 
@@ -120,4 +122,121 @@ test("a plan with no nutrition anywhere reports null rather than zero", () => {
   const s = summarizePlan([{ recipe_id: 3 }], recipes);
   assert.equal(s.caloriesPerDay, null, "null means unknown, 0 would read as a real figure");
   assert.equal(s.withNutrition, 0);
+});
+
+// ---------- leftovers ----------
+//
+// A leftover night is the same recipe eaten again off an earlier cook's spare
+// portions. Everything here is about the ways that can be nonsense: leftovers
+// of a meal that was never cooked, leftovers before the cooking, or more
+// leftover nights than the pot actually held.
+
+const LEFTOVER_WEEK = {
+  recipes: [
+    { id: 1, title: "Chicken Parm", prep_min: 15, cook_min: 30, nutrition: { calories: 700, protein: 45 } },
+    { id: 2, title: "Lentil Soup", prep_min: 10, cook_min: 40, nutrition: { calories: 400, protein: 20 } },
+  ],
+  weekStart: WEEK,
+};
+
+test("a batch is a whole number of nights, capped at something sane", () => {
+  assert.equal(batchSize(2), 2);
+  assert.equal(batchSize("3"), 3);
+  assert.equal(batchSize(2.4), 2, "you can't cook 2.4 nights of dinner");
+  assert.equal(batchSize(0), 1, "a night still has to feed you once");
+  assert.equal(batchSize(-5), 1);
+  assert.equal(batchSize(undefined), 1);
+  assert.equal(batchSize(99), MAX_BATCH, "a freezer of one curry is not a plan");
+});
+
+test("a double batch on Sunday can feed Tuesday", () => {
+  const { meals, dropped } = normalizeProposal({ days: [
+    { d: "2026-08-02", r: 2, b: 2, why: "big pot" },
+    { d: "2026-08-04", r: 2, k: "leftover" },
+  ] }, LEFTOVER_WEEK);
+  assert.deepEqual(dropped, []);
+  assert.equal(meals[0].kind, "cook");
+  assert.equal(meals[0].servings, 2);
+  assert.equal(meals[1].kind, "leftover");
+  assert.equal(meals[1].cook_date, "2026-08-02", "Tuesday knows which pot it came from");
+  assert.equal(meals[1].servings, 1);
+});
+
+test("leftovers of something never cooked are dropped", () => {
+  const { meals, dropped } = normalizeProposal({ days: [
+    { d: "2026-08-04", r: 1, k: "leftover" },
+  ] }, LEFTOVER_WEEK);
+  assert.equal(meals.length, 0);
+  assert.match(dropped[0], /isn't cooked earlier this week/);
+});
+
+test("leftovers before the meal they come from are dropped", () => {
+  // Tuesday can't eat Thursday's roast.
+  const { meals, dropped } = normalizeProposal({ days: [
+    { d: "2026-08-04", r: 1, k: "leftover" },
+    { d: "2026-08-06", r: 1, b: 2 },
+  ] }, LEFTOVER_WEEK);
+  assert.deepEqual(meals.map((m) => m.date), ["2026-08-06"]);
+  assert.match(dropped[0], /isn't cooked earlier this week/);
+});
+
+test("a batch of one has nothing spare, whatever order the days arrive in", () => {
+  // The leftover night is listed FIRST in the raw response. Judging it in
+  // arrival order would look for a cook night that hasn't been read yet.
+  const { meals, dropped } = normalizeProposal({ days: [
+    { d: "2026-08-05", r: 1, k: "leftover" },
+    { d: "2026-08-03", r: 1 },
+  ] }, LEFTOVER_WEEK);
+  assert.deepEqual(meals.map((m) => m.date), ["2026-08-03"]);
+  assert.match(dropped[0], /only 1 night\(s\) were cooked/);
+});
+
+test("three leftover nights off a double batch keeps two and drops one", () => {
+  const { meals, dropped } = normalizeProposal({ days: [
+    { d: "2026-08-02", r: 2, b: 3 },
+    { d: "2026-08-03", r: 2, k: "leftover" },
+    { d: "2026-08-04", r: 2, k: "leftover" },
+    { d: "2026-08-05", r: 2, k: "leftover" },
+  ] }, LEFTOVER_WEEK);
+  assert.equal(meals.length, 3, "one cook plus the two nights it actually made");
+  assert.equal(dropped.length, 1);
+  assert.match(dropped[0], /only 3 night\(s\) were cooked/);
+});
+
+test("cooking the same thing again refills the spare portions", () => {
+  const { meals, dropped } = normalizeProposal({ days: [
+    { d: "2026-08-02", r: 2, b: 2 },
+    { d: "2026-08-03", r: 2, k: "leftover" },
+    { d: "2026-08-06", r: 2, b: 2 },
+    { d: "2026-08-07", r: 2, k: "leftover" },
+  ] }, LEFTOVER_WEEK);
+  assert.deepEqual(dropped, []);
+  assert.equal(meals[3].cook_date, "2026-08-06", "Friday's leftovers are Thursday's pot, not Sunday's");
+});
+
+test("shopping buys the ingredients once, multiplied by the batch", () => {
+  const recipes = [{ id: 2, title: "Lentil Soup", ingredients: [
+    { name: "lentils", use_base: 200 }, { name: "stock", use_base: 500 },
+  ] }];
+  const meals = [
+    { date: "2026-08-02", recipe_id: 2, kind: "cook", servings: 2 },
+    { date: "2026-08-04", recipe_id: 2, kind: "leftover", servings: 1 },
+  ];
+  const cooking = cookedRecipes(meals, recipes);
+  assert.equal(cooking.length, 1, "the leftover night buys nothing");
+  assert.equal(cooking[0].ingredients[0].use_base, 400, "double batch, double lentils");
+  assert.equal(cooking[0].ingredients[1].use_base, 1000);
+});
+
+test("a week of leftovers is a week of eating but not a week of cooking", () => {
+  const meals = [
+    { date: "2026-08-02", recipe_id: 1, kind: "cook", servings: 2 },
+    { date: "2026-08-03", recipe_id: 1, kind: "leftover", servings: 1 },
+  ];
+  const s = summarizePlan(meals, LEFTOVER_WEEK.recipes);
+  assert.equal(s.meals, 2);
+  assert.equal(s.cookNights, 1);
+  assert.equal(s.leftoverNights, 1);
+  assert.equal(s.minutes, 45, "one pot, cooked once — not 90 minutes");
+  assert.equal(s.caloriesPerDay, 700, "you still eat on Monday");
 });

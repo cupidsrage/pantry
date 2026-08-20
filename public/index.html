@@ -216,6 +216,7 @@ import { groupBatches } from "/lib/pantry.js";
 import { recipeCoverage as coverageOf, recipeSoonestExpiry as soonestExpiryOf, recipeMatch, findDuplicateRecipe } from "/lib/recipes.js";
 import { parseDurations } from "/lib/durations.js";
 import { planCookAlong, mergeIngredients, cookItems } from "/lib/cookalong.js";
+import { expiryDigest } from "/lib/waste.js";
 
 const $ = (s, el=document) => el.querySelector(s);
 const api = (p, opt) => fetch("/api" + p, opt).then(r => r.json());
@@ -285,11 +286,28 @@ function minutesToText(min) {
   const h = Math.floor(min / 60), m = min % 60;
   return h ? (m ? `${h}h ${m}m` : `${h}h`) : `${m}m`;
 }
+// "Sun", "Tue" — for pointing a leftover night back at the pot it came from.
+function dayName(date) {
+  const d = new Date(String(date) + "T00:00:00");
+  return Number.isFinite(d.getTime()) ? DOW[d.getDay()] : String(date);
+}
+
+// The nights a batch feeds besides its own — read off the leftover rows that
+// point back at it, so the cook night can say what the extra portions are for.
+function coveredNights(cookMeal) {
+  return meals
+    .filter(m => m.kind === "leftover" && m.cook_date === cookMeal.date && m.recipe_id === cookMeal.recipe_id)
+    .map(m => dayName(m.date));
+}
+
 // Given a meal (with recipe + date + meal_time) return cooking/thaw reminders.
 function mealReminders(m) {
   const out = { start: null, thaw: [] };
   const r = m.recipe;
   if (!r) return out;
+  // Leftovers get reheated. There's no start time to warn about, and whatever
+  // needed thawing was pulled out on the night it was cooked.
+  if (m.kind === "leftover") return out;
   const total = (r.prep_min || 0) + (r.cook_min || 0);
 
   // Build the actual "eat" datetime from the planned date + time.
@@ -470,11 +488,18 @@ function plannerReview() {
   const s = p.summary;
   const dayRow = (m) => {
     const d = new Date(m.date + "T00:00:00");
+    const leftover = m.kind === "leftover";
+    const batch = Number(m.servings) > 1 ? Number(m.servings) : 1;
+    // A leftover night's whole point is that it costs nothing, so it says so
+    // where the cooking time would otherwise be.
+    const tag = leftover
+      ? `<span style="color:var(--accent-ink);font-weight:600">🍲 leftovers${m.cook_date ? ` from ${dayName(m.cook_date)}` : ""}</span>`
+      : batch > 1 ? `<span style="color:var(--accent-ink);font-weight:600">×${batch} batch</span>` : "";
     return `<div style="display:flex;gap:10px;padding:7px 0;border-top:1px solid var(--surface-2)">
       <span style="flex:none;width:46px;font-weight:600;font-size:13px">${DOW[d.getDay()]} ${d.getDate()}</span>
       <span style="flex:1;min-width:0">
         <span style="font-size:13px;font-weight:500;text-transform:capitalize">${esc(m.title)}</span>
-        ${m.why ? `<br><span class="meta" style="font-size:11px">${esc(m.why)}</span>` : ""}
+        ${tag || m.why ? `<br><span class="meta" style="font-size:11px">${tag}${tag && m.why ? " · " : ""}${m.why ? esc(m.why) : ""}</span>` : ""}
       </span>
       <span class="meta" style="flex:none;font-size:11px">${fmtTime(m.meal_time)}</span>
     </div>`;
@@ -486,9 +511,11 @@ function plannerReview() {
   return `
     <div style="padding:12px">
       ${p.note ? `<p class="meta" style="margin-bottom:8px">${esc(p.note)}</p>` : ""}
+      ${s.leftoverNights ? `<p class="meta" style="margin-bottom:8px;color:var(--accent-ink);font-weight:600">
+        🍲 ${s.cookNights} night${s.cookNights === 1 ? "" : "s"} at the stove for ${s.meals} dinners — ${minutesToText(s.minutes)} of cooking all week.</p>` : ""}
       <div style="display:flex;gap:6px;padding:8px 0;background:var(--bg);border-radius:8px;margin-bottom:6px">
         ${stat(s.meals, "meals")}
-        ${stat(minutesToText(s.minutes) || "—", "cooking")}
+        ${stat(s.leftoverNights ? `${s.cookNights}` : minutesToText(s.minutes) || "—", s.leftoverNights ? "cook nights" : "cooking")}
         ${stat(s.caloriesPerDay == null ? "—" : s.caloriesPerDay, "kcal/day")}
         ${stat(p.cost.total > 0 ? "$" + p.cost.total.toFixed(0) : "—", "to buy")}
       </div>
@@ -556,6 +583,55 @@ function thawWhenText(dt) {
   if (dayDiff === 0) return `today ${t}`;
   if (dayDiff === 1) return `tomorrow ${t}`;
   return `${DOW[dt.getDay()]} ${t}`;
+}
+
+// Cook once, eat twice: how many nights this pot is for, or — when the same
+// recipe is already cooked earlier in the week with portions to spare — the
+// option to make this night one of those spare portions instead.
+//
+// The offer only appears when it's real. A recipe that isn't cooked earlier in
+// the week, or whose batch is already spoken for, has no leftovers to eat, and
+// a checkbox that says otherwise is a checkbox that produces an error.
+function leftoverSource(dY) {
+  if (!planAddRecipe) return null;
+  const id = +planAddRecipe;
+  // The most recent pot, and only that one — spare portions come from the last
+  // time it was cooked, not from something four days older. The server and the
+  // week planner both work the same way, so all three agree on what's offered,
+  // what's accepted, and what a generated week may contain.
+  const cook = meals
+    .filter(m => m.recipe_id === id && m.kind !== "leftover" && m.date < dY)
+    .sort((a, b) => b.date.localeCompare(a.date))[0];
+  if (!cook) return null;
+  const batch = Number(cook.servings) > 1 ? Number(cook.servings) : 1;
+  const eaten = meals.filter(m => m.kind === "leftover" && m.cook_date === cook.date && m.recipe_id === id).length;
+  return eaten < batch - 1 ? cook : null;
+}
+
+function batchRow(dY) {
+  if (!planAddRecipe) return "";
+  const source = leftoverSource(dY);
+  const step = (d, label) => `<button class="ic" data-planbatch="${d}"
+    style="border:1px solid var(--border-strong);border-radius:8px;padding:2px 10px;font-size:14px">${label}</button>`;
+
+  const leftoverOption = source ? `
+    <label style="display:flex;gap:8px;align-items:center;cursor:pointer;margin-top:8px">
+      <input type="checkbox" id="planLeftover" ${planAddLeftover ? "checked" : ""}
+        style="accent-color:var(--accent);width:16px;height:16px;flex:none" />
+      <span style="font-size:13px">🍲 ${G("Raise ", "Eat ")}${dayName(source.date)}'s leftovers<br>
+        <span class="meta">nothing to cook, nothing to buy</span></span>
+    </label>` : "";
+
+  if (planAddLeftover && source) return leftoverOption;
+
+  return `<div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap">
+      <span class="meta" style="flex:1;min-width:120px">Cook enough for</span>
+      ${step(-1, "−")}
+      <span class="qty" style="min-width:64px;text-align:center">${planAddBatch} night${planAddBatch === 1 ? "" : "s"}</span>
+      ${step(1, "+")}
+    </div>
+    ${planAddBatch > 1 ? `<p class="meta" style="font-size:11px;margin-top:4px">Buys ×${planAddBatch} of the ingredients. Add the other night${planAddBatch > 2 ? "s" : ""} as leftovers.</p>` : ""}
+    ${leftoverOption}`;
 }
 
 // Searchable, sortable list of saved recipes used when adding a meal to a day.
@@ -630,25 +706,33 @@ function planView() {
 
     for (const m of dayMeals) {
       const rem = mealReminders(m);
+      const leftover = m.kind === "leftover";
+      const batch = Number(m.servings) > 1 ? Number(m.servings) : 1;
       html += `<div style="margin-top:8px;padding:8px;background:var(--bg);border-radius:8px">
         <div style="display:flex;justify-content:space-between;align-items:start;gap:8px">
           <div style="flex:1">
-            <span style="font-weight:600;font-size:14px">${esc(m.title)}</span>
+            <span style="font-weight:600;font-size:14px">${leftover ? "🍲 " : ""}${esc(m.title)}</span>
             ${m.meal_time ? `<span class="meta"> · eat ${fmtTime(m.meal_time)}</span>` : ""}
-            ${m.recipe && (m.recipe.prep_min || m.recipe.cook_min) ? `<br><span class="meta">${m.recipe.prep_min ? `prep ${minutesToText(m.recipe.prep_min)}` : ""}${m.recipe.prep_min && m.recipe.cook_min ? " · " : ""}${m.recipe.cook_min ? `cook ${minutesToText(m.recipe.cook_min)}` : ""}</span>` : ""}
+            ${leftover
+              ? `<br><span class="meta" style="color:var(--accent-ink);font-weight:600">${G("risen again", "leftovers")}${m.cook_date ? ` from ${dayName(m.cook_date)}` : ""} · nothing to cook</span>`
+              : batch > 1
+                ? `<br><span class="meta" style="color:var(--accent-ink);font-weight:600">×${batch} batch${coveredNights(m).length ? ` · also feeds ${coveredNights(m).join(", ")}` : ""}</span>`
+                : ""}
+            ${!leftover && m.recipe && (m.recipe.prep_min || m.recipe.cook_min) ? `<br><span class="meta">${m.recipe.prep_min ? `prep ${minutesToText(m.recipe.prep_min)}` : ""}${m.recipe.prep_min && m.recipe.cook_min ? " · " : ""}${m.recipe.cook_min ? `cook ${minutesToText(m.recipe.cook_min)}` : ""}</span>` : ""}
             ${rem.start ? `<br><span class="meta" style="color:var(--sky-ink);font-weight:600">▶ start cooking ~${rem.start}</span>` : ""}
             ${rem.thaw.length ? `<br><span class="meta" style="color:var(--warn-ink);font-weight:600">❄ thaw ahead: ${rem.thaw.join(", ")}</span>` : ""}
           </div>
           <button class="ic del" data-mealdel="${m.id}" style="flex:none">🗑</button>
         </div>
-        ${m.recipe ? `<button class="btn btn-sky" data-mealopen="${m.recipe.id}" style="width:auto;padding:3px 10px;font-size:12px;margin-top:6px">Open recipe</button>` : ""}
+        ${m.recipe ? `<button class="btn btn-sky" data-mealopen="${m.recipe.id}" data-mealservings="${batch}"
+          style="width:auto;padding:3px 10px;font-size:12px;margin-top:6px">Open recipe${batch > 1 ? ` ×${batch}` : ""}</button>` : ""}
       </div>`;
     }
 
     // Two dishes on one night is a cook-along waiting to happen: same day, and
     // you want them on the table together. Hand the day straight to the
     // scheduler rather than making anyone re-pick the same recipes by hand.
-    const cookable = dayMeals.filter(m => m.recipe);
+    const cookable = dayMeals.filter(m => m.recipe && m.kind !== "leftover");
     if (cookable.length >= 2) {
       const running = cookAlong && cookAlong.stage === "run";
       html += `<button class="btn btn-sky" data-cookday="${dY}" style="margin-top:8px;padding:6px 10px;font-size:12px">
@@ -660,6 +744,7 @@ function planView() {
     if (planAddDay === dY) {
       html += `<div style="margin-top:8px;padding:8px;background:var(--info-soft);border-radius:8px">
         ${recipePicker()}
+        ${batchRow(dY)}
         <div style="display:flex;gap:6px;align-items:center;margin:8px 0 6px">
           <span class="meta">eat at</span>
           <input id="planTime" type="time" value="${planAddTime}" style="padding:6px;border:1px solid var(--border-strong);border-radius:8px;font-size:14px" />
@@ -700,6 +785,8 @@ let meals = [];               // planned meals for the visible week
 let planWeekStart = null;     // Date (local) of the Sunday starting the shown week
 let planAddDay = null;        // 'YYYY-MM-DD' of the day whose add-form is open
 let planAddTime = "18:00", planAddRecipe = "";
+let planAddBatch = 1;          // nights one cook feeds: 1 is just tonight
+let planAddLeftover = false;   // eating an earlier night's spare portions
 let planSearch = "";           // recipe-picker search box text
 let planSort = "recent";       // picker order — same modes as the Saved tab
 let lightbox = null;          // data URL of a photo shown full-screen, or null
@@ -745,8 +832,16 @@ async function ensureRecipeTimes() {
 
 async function savePlanMeal() {
   if (!planAddRecipe) { err = "Pick a recipe."; render(); return; }
-  await api("/meals", J({ m: "POST", b: { date: planAddDay, meal_time: planAddTime, recipe_id: +planAddRecipe } }));
-  planAddDay = null; err = "";
+  const leftover = planAddLeftover && !!leftoverSource(planAddDay);
+  const r = await api("/meals", J({ m: "POST", b: {
+    date: planAddDay, meal_time: planAddTime, recipe_id: +planAddRecipe,
+    kind: leftover ? "leftover" : "cook",
+    servings: leftover ? 1 : planAddBatch,
+  } }));
+  // The server checks the leftover rules too — it owns the plan, and another
+  // device may have changed the week since this page drew it.
+  if (r && r.error) { err = r.error; render(); return; }
+  planAddDay = null; err = ""; planAddBatch = 1; planAddLeftover = false;
   loadMeals();
 }
 
@@ -1927,6 +2022,38 @@ function spendPanel() {
     </div>${body}</div>`;
 }
 
+// "These three things are about to go off, and here's what they make."
+//
+// The same rule the daily reminder uses — one copy, so the notification and the
+// page can't disagree — but shown to everyone, including anyone who hasn't
+// turned reminders on or whose server has no push keys. Food a planned meal is
+// already going to use isn't listed: that decision has been made.
+function useItUpStrip() {
+  const planned = [];
+  for (const m of meals) {
+    if (!m.recipe) continue;
+    for (const ing of (m.recipe.ingredients || [])) planned.push(ing.name);
+  }
+  const digest = expiryDigest({ pantry, recipes: saved, planned });
+  if (!digest) return "";
+
+  const canMake = digest.recipes.filter(r => r.have === r.total);
+  const suggestion = canMake.length ? canMake : digest.recipes.slice(0, 1);
+  return `<div style="border:1px solid var(--warn-soft-border, var(--border-strong));background:var(--warn-soft, var(--surface));
+      border-radius:12px;padding:10px 12px;margin-bottom:12px">
+    <p style="font-size:13px;font-weight:600;margin-bottom:4px">
+      ${G("⏳ The cellar is turning", "⏳ Use these up")}</p>
+    <p class="meta" style="font-size:12px;line-height:1.5">${digest.items.slice(0, 5).map(it =>
+      `<span style="color:${it.days < 0 ? "var(--danger-ink)" : "var(--warn-ink)"};font-weight:600">${esc(it.name)}</span> <span>(${esc(it.text)})</span>`
+    ).join(" · ")}${digest.items.length > 5 ? ` · +${digest.items.length - 5} more` : ""}</p>
+    ${suggestion.length ? `<p style="font-size:12px;margin-top:7px">
+      ${canMake.length ? G("Tonight you could raise:", "You could make:") : "Uses some of it:"}
+      ${suggestion.slice(0, 3).map(r => `<button class="ic link" data-open-recipe="${r.id}"
+        style="border:0;background:none;cursor:pointer;color:var(--sky-ink);font-size:12px;font-weight:600;width:auto;padding:0 2px;text-decoration:underline">${esc(r.title)}</button>`).join(" · ")}
+    </p>` : ""}
+  </div>`;
+}
+
 function pantryView() {
   let html = `<div class="addbar">
     <input id="pname" placeholder="Item" style="flex:1;min-width:120px" />
@@ -2013,6 +2140,7 @@ function pantryView() {
     </div>`;
   }
   if (err && tab === "pantry") html += `<p class="err">${esc(err)}</p>`;
+  html += useItUpStrip();
   const groups = groupedPantry();
   if (!groups.length) html += `<p class="empty">${G("The cellar is bare. Whatever you buy is carried down here.", "Pantry is empty. Purchased items land here automatically.")}</p>`;
   else html += groups.map(g => {
@@ -2045,7 +2173,108 @@ function pantryView() {
       <button class="ic del" data-pgroupdel="${esc(g.name)}" title="remove all of this item">🗑</button>
     </div>${useOpen ? pantryUseEditor(g, pantryUse) : ""}`;
   }).join("");
-  return html + spendPanel();
+  return html + spendPanel() + backupPanel();
+}
+
+// ---------- backup ----------
+// Everything in this app is on one server's disk. This is the way off it.
+let backupBusy = false, backupMsg = "", backupMsgTone = "var(--muted)";
+let restorePending = null;   // a chosen file, checked but not yet written:
+                             // { backup, summary, mode }
+
+function backupPanel() {
+  const note = backupMsg
+    ? `<p class="meta" style="font-size:12px;margin-top:8px;color:${backupMsgTone}">${esc(backupMsg)}</p>` : "";
+
+  // A restore that would change something asks first, and says exactly what it
+  // found — "restore" is the one button here that can't be undone by hand.
+  if (restorePending) {
+    return `<div style="border:1px solid var(--border-strong);background:var(--surface);border-radius:12px;padding:12px;margin-top:16px">
+      <p style="font-size:14px;font-weight:600;margin-bottom:4px">Restore this backup?</p>
+      <p class="meta" style="font-size:12px;line-height:1.5">${esc(restorePending.summary)}</p>
+      <p class="meta" style="font-size:11px;margin-top:6px">Nothing already here is deleted or overwritten — anything the backup has that you don't is added.</p>
+      <div style="display:flex;gap:6px;margin-top:10px">
+        <button class="btn btn-green" id="restoreGo" ${backupBusy ? "disabled" : ""} style="flex:2">${backupBusy ? "Restoring…" : "Restore"}</button>
+        <button class="btn btn-dark" id="restoreCancel" ${backupBusy ? "disabled" : ""} style="width:auto;padding:0 14px">✕</button>
+      </div>
+      ${note}
+    </div>`;
+  }
+
+  return `<div style="margin-top:16px;text-align:center">
+    <input id="restoreInput" type="file" accept="application/json,.json" style="display:none" />
+    <button class="ic link" id="backupExport" ${backupBusy ? "disabled" : ""}
+      style="font-size:12px;border:0;background:none;cursor:pointer;color:var(--sky-ink);width:auto;padding:0 6px">⬇ ${G("Copy the grimoire", "Download a backup")}</button>
+    <span class="meta" style="font-size:12px">·</span>
+    <button class="ic link" id="backupRestore" ${backupBusy ? "disabled" : ""}
+      style="font-size:12px;border:0;background:none;cursor:pointer;color:var(--sky-ink);width:auto;padding:0 6px">⬆ Restore</button>
+    ${note}
+  </div>`;
+}
+
+// The browser saves the file; the server just serves it. Fetching it as a blob
+// rather than navigating keeps the session cookie and the app on screen.
+async function downloadBackup() {
+  backupBusy = true; backupMsg = ""; render();
+  try {
+    const r = await fetch("/api/export");
+    if (!r.ok) throw new Error("The server wouldn't give up the file.");
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `pantry-backup-${ymd(new Date())}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    backupMsg = "Saved. Keep it somewhere that isn't this server.";
+    backupMsgTone = "var(--accent-ink)";
+  } catch (e) {
+    backupMsg = e && e.message ? e.message : "Couldn't download the backup.";
+    backupMsgTone = "var(--danger-ink)";
+  } finally {
+    backupBusy = false; render();
+  }
+}
+
+// Two steps on purpose: read the file, ask the server what restoring it would
+// actually do, and show that answer before anything is written.
+async function chooseRestore(file) {
+  backupBusy = true; backupMsg = ""; render();
+  try {
+    const text = await file.text();
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch { throw new Error("That file isn't readable JSON."); }
+    const r = await api("/import", J({ m: "POST", b: { backup: parsed, dryRun: true } }));
+    if (r.error) throw new Error(r.error);
+    restorePending = { backup: parsed, summary: r.summary, mode: r.mode };
+  } catch (e) {
+    backupMsg = e && e.message ? e.message : "Couldn't read that backup.";
+    backupMsgTone = "var(--danger-ink)";
+  } finally {
+    backupBusy = false; render();
+  }
+}
+
+async function runRestore() {
+  backupBusy = true; backupMsg = ""; render();
+  try {
+    const r = await api("/import", J({ m: "POST", b: { backup: restorePending.backup } }));
+    if (r.error) throw new Error(r.error);
+    restorePending = null;
+    backupMsg = `Restored — ${r.summary}`;
+    backupMsgTone = "var(--accent-ink)";
+    backupBusy = false;
+    await refresh();
+    loadMeals();
+    return;
+  } catch (e) {
+    backupMsg = e && e.message ? e.message : "Couldn't restore that backup.";
+    backupMsgTone = "var(--danger-ink)";
+  }
+  backupBusy = false; render();
 }
 
 function wire() {
@@ -2103,7 +2332,8 @@ function wire() {
   const plPrev = $("#planPrev"); if (plPrev) plPrev.onclick = () => { planWeekStart = addDays(planWeekStart, -7); planAddDay = null; loadMeals(); };
   const plNext = $("#planNext"); if (plNext) plNext.onclick = () => { planWeekStart = addDays(planWeekStart, 7); planAddDay = null; loadMeals(); };
   document.querySelectorAll("[data-planadd]").forEach(b => b.onclick = () => {
-    planAddDay = b.dataset.planadd; planAddRecipe = ""; planSearch = ""; err = ""; render();
+    planAddDay = b.dataset.planadd; planAddRecipe = ""; planSearch = ""; err = "";
+    planAddBatch = 1; planAddLeftover = false; render();
   });
   const psr = $("#planSearch");
   if (psr) {
@@ -2136,8 +2366,13 @@ function wire() {
   const planListChk = $("#planAddList");
   if (planListChk) planListChk.onchange = () => { planner.addToList = planListChk.checked; };
   document.querySelectorAll("[data-planpick]").forEach(b => b.onclick = () => {
-    planAddRecipe = b.dataset.planpick; err = ""; renderPicker(false);
+    planAddRecipe = b.dataset.planpick; err = ""; planAddBatch = 1; planAddLeftover = false; renderPicker(false);
   });
+  document.querySelectorAll("[data-planbatch]").forEach(b => b.onclick = () => {
+    planAddBatch = Math.min(4, Math.max(1, planAddBatch + (+b.dataset.planbatch)));
+    render();
+  });
+  const plo = $("#planLeftover"); if (plo) plo.onchange = () => { planAddLeftover = plo.checked; render(); };
   const plt = $("#planTime"); if (plt) plt.oninput = () => { planAddTime = plt.value; };
   const pls = $("#planSave"); if (pls) pls.onclick = savePlanMeal;
   const plc = $("#planCancel"); if (plc) plc.onclick = () => { planAddDay = null; render(); };
@@ -2145,7 +2380,7 @@ function wire() {
     await api(`/meals/${b.dataset.mealdel}`, { method: "DELETE" }); loadMeals();
   });
   document.querySelectorAll("[data-mealopen]").forEach(b => b.onclick = async () => {
-    viewing = await api(`/recipes/${b.dataset.mealopen}`); servings = 1; cookStep = -1; showPhotos = false; shareOpen = false; shareMsg = ""; err = "";
+    viewing = await api(`/recipes/${b.dataset.mealopen}`); servings = +b.dataset.mealservings || 1; cookStep = -1; showPhotos = false; shareOpen = false; shareMsg = ""; err = "";
     tab = "saved";
     document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "saved"));
     render();
@@ -2158,7 +2393,12 @@ function wire() {
   if (ssr) ssr.oninput = () => { savedSearch = ssr.value; renderSaved(true); };
   const ssc = $("#savedSearchClear"); if (ssc) ssc.onclick = () => { savedSearch = ""; renderSaved(true); };
   document.querySelectorAll("[data-open-recipe]").forEach(b => b.onclick = async () => {
-    viewing = await api(`/recipes/${b.dataset.openRecipe}`); servings = 1; cookStep = -1; showPhotos = false; shareOpen = false; shareMsg = ""; err = ""; render();
+    viewing = await api(`/recipes/${b.dataset.openRecipe}`); servings = 1; cookStep = -1; showPhotos = false; shareOpen = false; shareMsg = ""; err = "";
+    // The recipe view lives on the Saved tab, so go there — a no-op when
+    // that's where the tap came from.
+    tab = "saved";
+    document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "saved"));
+    render();
     ensureRecipeTimes();
   });
   const so = $("#shareOpenBtn"); if (so) so.onclick = () => { shareOpen = true; shareMsg = ""; render(); };
@@ -2319,6 +2559,12 @@ function wire() {
     render();
     if (spendOpen) loadSpend();
   };
+  const bxp = $("#backupExport"); if (bxp) bxp.onclick = downloadBackup;
+  const bri = $("#restoreInput");
+  const brs = $("#backupRestore"); if (brs && bri) brs.onclick = () => bri.click();
+  if (bri) bri.onchange = () => { if (bri.files && bri.files[0]) chooseRestore(bri.files[0]); bri.value = ""; };
+  const rsg = $("#restoreGo"); if (rsg) rsg.onclick = runRestore;
+  const rsc = $("#restoreCancel"); if (rsc) rsc.onclick = () => { restorePending = null; backupMsg = ""; render(); };
   const rcc = $("#receiptConfirm"); if (rcc) rcc.onclick = confirmReceipt;
   const rcx = $("#receiptCancel"); if (rcx) rcx.onclick = () => { receiptItems = null; err = ""; render(); };
   const ppn = $("#ppName"); if (ppn) ppn.oninput = () => { pantryPending.name = ppn.value; };
@@ -2923,6 +3169,8 @@ async function startApp() {
   $("#app").style.display = "block";
   tab = "recipe"; viewing = null;
   await refresh();
+  loadMeals();                                              // in the background: the Pantry tab's
+                                                            // "use it up" strip needs the week
   initPush().then(() => { if (tab === "plan") render(); }); // in the background — never gates the UI
   restoreCookAlong();                                       // ditto: dinner may already be in progress
 }

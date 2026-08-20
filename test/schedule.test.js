@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { eatAtMs, mealTimes, thawAtMs, isDue, REMINDER_WINDOW_MS } from "../lib/schedule.js";
+import { eatAtMs, mealTimes, thawAtMs, isDue, localDay, REMINDER_WINDOW_MS } from "../lib/schedule.js";
 
 // Date.getTimezoneOffset() returns minutes to ADD to local time to reach UTC,
 // so it is POSITIVE west of Greenwich.
@@ -77,4 +77,15 @@ test("a reminder goes stale rather than firing hours after the fact", () => {
   assert.equal(isDue(at, at + REMINDER_WINDOW_MS), true, "still inside the window");
   assert.equal(isDue(at, at + REMINDER_WINDOW_MS + 1), false, "just past it");
   assert.equal(isDue(at, at + 6 * 3600000), false, "six hours later");
+});
+
+test("the day a reminder is about is the shopper's day, not the server's", () => {
+  // 01:00 Berlin on the 4th is 23:00Z on the 3rd. A digest fired then belongs
+  // to the 4th — dating it by UTC would fire it twice, once per calendar.
+  const berlinEarly = Date.parse("2026-08-03T23:00:00Z");
+  assert.equal(localDay(berlinEarly, BERLIN), "2026-08-04");
+  assert.equal(localDay(berlinEarly, UTC), "2026-08-03");
+  // 5pm in California on the 3rd is already the 4th in UTC.
+  const laEvening = Date.parse("2026-08-04T00:00:00Z");
+  assert.equal(localDay(laEvening, LA), "2026-08-03");
 });
