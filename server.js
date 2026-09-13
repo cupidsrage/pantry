@@ -183,6 +183,9 @@ function migrate() {
   // recipes: estimated prep & cook time (minutes) for schedule "start cooking" math
   if (!columns("recipes").includes("prep_min")) db.exec("ALTER TABLE recipes ADD COLUMN prep_min INTEGER DEFAULT 0");
   if (!columns("recipes").includes("cook_min")) db.exec("ALTER TABLE recipes ADD COLUMN cook_min INTEGER DEFAULT 0");
+  // Owners can publish individual recipes to the account-wide community book.
+  // Private is the safe default for every recipe saved before this feature.
+  if (!columns("recipes").includes("is_public")) db.exec("ALTER TABLE recipes ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0");
   // pantry: expiration tracking — when it was added, how it's stored, and the
   // per-storage shelf life (JSON: {pantry,fridge,freezer,thawed} in days).
   const pc = columns("pantry");
@@ -1076,7 +1079,7 @@ app.post("/api/parse", requireAuth, async (req, res) => {
 
 // ---------- saved recipes ----------
 app.get("/api/recipes", requireAuth, (req, res) =>
-  res.json(db.prepare("SELECT id,title,source_url,created,ingredients FROM recipes WHERE user_id=? ORDER BY created DESC").all(req.userId)
+  res.json(db.prepare("SELECT id,title,source_url,created,ingredients,is_public FROM recipes WHERE user_id=? ORDER BY created DESC").all(req.userId)
     .map((r) => ({ ...r, ingredients: JSON.parse(r.ingredients || "[]") }))));
 app.get("/api/recipes/:id", requireAuth, (req, res) => {
   const row = db.prepare("SELECT * FROM recipes WHERE id=? AND user_id=?").get(req.params.id, req.userId);
@@ -1084,6 +1087,37 @@ app.get("/api/recipes/:id", requireAuth, (req, res) => {
   res.json({ ...row, ingredients: JSON.parse(row.ingredients), steps: JSON.parse(row.steps),
     nutrition: row.nutrition ? JSON.parse(row.nutrition) : null,
     photos: row.photos ? JSON.parse(row.photos) : [] });
+});
+
+// The public recipe book is visible to signed-in accounts, but exposes no user
+// data beyond the owner's username and the recipe they deliberately published.
+app.get("/api/public-recipes", requireAuth, (req, res) => {
+  const rows = db.prepare(`SELECT r.id,r.title,r.source_url,r.created,r.ingredients,
+      r.user_id=? AS is_owner,u.username AS owner_username
+    FROM recipes r JOIN users u ON u.id=r.user_id
+    WHERE r.is_public=1 ORDER BY r.created DESC`).all(req.userId);
+  res.json(rows.map((r) => ({ ...r, is_owner: !!r.is_owner,
+    ingredients: JSON.parse(r.ingredients || "[]") })));
+});
+
+app.get("/api/public-recipes/:id", requireAuth, (req, res) => {
+  const row = db.prepare(`SELECT r.*,r.user_id=? AS is_owner,u.username AS owner_username
+    FROM recipes r JOIN users u ON u.id=r.user_id WHERE r.id=? AND r.is_public=1`)
+    .get(req.userId, req.params.id);
+  if (!row) return res.status(404).json({ error: "public recipe not found" });
+  res.json({ ...row, is_owner: !!row.is_owner, is_public_view: true,
+    ingredients: JSON.parse(row.ingredients), steps: JSON.parse(row.steps),
+    nutrition: row.nutrition ? JSON.parse(row.nutrition) : null,
+    photos: row.photos ? JSON.parse(row.photos) : [] });
+});
+
+app.patch("/api/recipes/:id/public", requireAuth, (req, res) => {
+  if (typeof req.body.is_public !== "boolean")
+    return res.status(400).json({ error: "is_public must be true or false" });
+  const info = db.prepare("UPDATE recipes SET is_public=? WHERE id=? AND user_id=?")
+    .run(req.body.is_public ? 1 : 0, req.params.id, req.userId);
+  if (!info.changes) return res.status(404).json({ error: "recipe not found" });
+  res.json({ ok: true, is_public: req.body.is_public });
 });
 app.post("/api/recipes", requireAuth, (req, res) => {
   const { title, source_url = "", ingredients = [], steps = [], nutrition = null, photos = [],
