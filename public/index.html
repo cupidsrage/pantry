@@ -201,6 +201,7 @@
       <button class="tab" data-tab="list">List</button>
       <button class="tab" data-tab="pantry">Pantry</button>
       <button class="tab" data-tab="saved">Saved</button>
+      <button class="tab" data-tab="public">Public</button>
       <button class="tab" data-tab="plan">Plan</button>
     </div>
     <div id="view"></div>
@@ -763,7 +764,7 @@ function planView() {
 
 let tab = "recipe", pantry = [], list = [], parsed = null, rawRecipe = "", parsing = false, err = "";
 let recipeUrl = "", parsedTitle = "", parsedSteps = [], parsedSource = "", parsedNutrition = null, parsedPhotos = [], parsedPrep = 0, parsedCook = 0;
-let saved = [], viewing = null, servings = 1, cookStep = -1;
+let saved = [], publicRecipes = [], viewing = null, servings = 1, cookStep = -1;
 let cookIngOpen = false;      // cook mode: full ingredient list expanded
 let cookAlong = null;         // several dishes at once — see emptyCookAlong()
 let cookTick = null;          // repaints the timeline's "now" line while it runs
@@ -816,6 +817,13 @@ async function loadMeals() {
   render();
 }
 
+async function loadPublicRecipes() {
+  const r = await api("/public-recipes");
+  if (!Array.isArray(r)) { showAuth(); return; }
+  publicRecipes = r;
+  render();
+}
+
 // Older recipes saved before time-estimation have prep_min/cook_min of 0.
 // When one is opened, estimate its times once in the background and show them.
 async function ensureRecipeTimes() {
@@ -851,6 +859,7 @@ document.querySelectorAll(".tab").forEach(b =>
     document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t === b));
     if (tab === "plan") { planAddDay = null; loadMeals(); }
     else if (tab === "saved") { refresh(); }
+    else if (tab === "public") { loadPublicRecipes(); }
     else render();
   });
 
@@ -860,6 +869,7 @@ function render() {
     tab === "list" ? listView() :
     tab === "pantry" ? pantryView() :
     tab === "plan" ? planView() :
+    tab === "public" ? publicView() :
     savedView()) + lightboxHtml() + timerWidget();
   // keep the timer stack clear of the content behind it
   document.body.style.paddingBottom = timers.length ? `${timers.length * 72 + 26}px` : "";
@@ -1132,6 +1142,21 @@ function savedView() {
   return html;
 }
 
+function publicView() {
+  if (viewing) return recipeDetailView();
+  if (!publicRecipes.length) return `<p class="empty">No public recipes yet. Open one of your saved recipes and publish it for everyone.</p>`;
+  return `<div style="margin-bottom:14px">
+      <div style="font-size:17px;font-weight:700">Community recipes</div>
+      <p class="meta" style="margin-top:3px">Recipes members chose to share with every account.</p>
+    </div>` + publicRecipes.map((r) => `<div class="row">
+      <span style="flex:1;min-width:0" data-open-public="${r.id}" role="button">
+        <span class="name">${esc(r.title)}</span><br>
+        <span class="meta">by ${esc(r.owner_username)}${r.is_owner ? " · yours" : ""} · ${(r.ingredients || []).length} ingredients</span>
+      </span>
+      <button class="btn btn-sky" data-open-public="${r.id}" style="width:auto;padding:6px 14px">Open</button>
+    </div>`).join("");
+}
+
 // Render a per-serving nutrition panel from a nutrition object.
 function nutritionBlock(n) {
   if (!n || (!n.calories && !n.protein && !n.carbs && !n.fat)) return "";
@@ -1154,7 +1179,8 @@ function recipeDetailView() {
   const photos = r.photos || [];
   const hasPdf = photos.some(p => typeof p === "string" && p.startsWith("data:application/pdf"));
   return `
-    <button class="ic" id="backSaved" style="font-size:14px;margin-bottom:8px">← all recipes</button>
+    <button class="ic" id="backSaved" style="font-size:14px;margin-bottom:8px">← ${r.is_public_view ? "public recipes" : "all recipes"}</button>
+    ${r.is_public_view ? `<p class="meta" style="margin-bottom:8px">Shared by <strong>${esc(r.owner_username)}</strong></p>` : ""}
     <div class="parsed">
       <div class="parsed-head" style="display:flex;justify-content:space-between;align-items:center">
         <span>${esc(r.title)}</span>
@@ -1225,7 +1251,8 @@ function recipeDetailView() {
           <button class="btn btn-sky" id="rToListAll">Add all → List</button>
         </div>
         <button class="btn btn-dark" id="rCook" style="margin-top:8px">Cooked it → subtract stock</button>
-        ${shareOpen ? `
+        ${r.is_public_view ? "" : `<button class="btn" id="publicToggle" style="margin-top:8px;background:${r.is_public ? "var(--accent-soft)" : "var(--border)"};color:${r.is_public ? "var(--accent-ink)" : "var(--chip-ink)"}">${r.is_public ? "🌐 Public · make private" : "🔒 Private · make public"}</button>`}
+        ${r.is_public_view ? "" : shareOpen ? `
           <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
             <div class="meta" style="font-weight:600;margin-bottom:6px">Share this recipe with another account</div>
             <div style="display:flex;gap:8px">
@@ -2401,7 +2428,14 @@ function wire() {
     render();
     ensureRecipeTimes();
   });
+  document.querySelectorAll("[data-open-public]").forEach(b => b.onclick = async () => {
+    viewing = await api(`/public-recipes/${b.dataset.openPublic}`);
+    if (!viewing || viewing.error) { err = (viewing && viewing.error) || "Couldn't open that recipe."; render(); return; }
+    servings = 1; cookStep = -1; showPhotos = false; shareOpen = false; shareMsg = ""; err = "";
+    render();
+  });
   const so = $("#shareOpenBtn"); if (so) so.onclick = () => { shareOpen = true; shareMsg = ""; render(); };
+  const pub = $("#publicToggle"); if (pub) pub.onclick = toggleRecipePublic;
   const sg = $("#shareGo"); if (sg) sg.onclick = shareRecipe;
   const shu = $("#shareUser"); if (shu) shu.onkeydown = e => { if (e.key === "Enter") shareRecipe(); };
   const tp = $("#togglePhotos"); if (tp) tp.onclick = () => { showPhotos = !showPhotos; render(); };
@@ -2891,6 +2925,17 @@ async function shareRecipe() {
   render();
 }
 
+async function toggleRecipePublic() {
+  if (!viewing || viewing.is_public_view) return;
+  const makePublic = !viewing.is_public;
+  const r = await api(`/recipes/${viewing.id}/public`, J({ m: "PATCH", b: { is_public: makePublic } }));
+  if (r.error) { err = r.error; render(); return; }
+  viewing.is_public = r.is_public ? 1 : 0;
+  const summary = saved.find(x => x.id === viewing.id);
+  if (summary) summary.is_public = viewing.is_public;
+  render();
+}
+
 async function saveRecipe() {
   if (!(await reparseIfDirty())) { render(); return; }
   err = "";
@@ -3200,7 +3245,8 @@ function applyTheme() {
   const out = $("#logout");
   if (out) out.textContent = G("Leave", "Log out");
   const tabs = { recipe: G("Recipe", "Recipe"), list: G("Hunt", "List"),
-                 pantry: G("Cellar", "Pantry"), saved: G("Grimoire", "Saved"), plan: G("Nights", "Plan") };
+                 pantry: G("Cellar", "Pantry"), saved: G("Grimoire", "Saved"),
+                 public: G("Commons", "Public"), plan: G("Nights", "Plan") };
   for (const [key, label] of Object.entries(tabs)) {
     const el = $(`.tab[data-tab="${key}"]`);
     if (el) el.textContent = label;
