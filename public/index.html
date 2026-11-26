@@ -780,6 +780,8 @@ let dupe = null;              // a save the server refused as already-saved:
 let photoImages = [];         // multiple pages: [{base64, mediaType, dataUrl}]
 let savedSort = "recent";     // "recent" | "az" | "canmake" | "expiring"
 let savedSearch = "";         // Saved tab search box text
+let publicSort = "recent";    // Public tab order: "recent" | "az" | "canmake" | "author"
+let publicSearch = "";        // Public tab search box text
 let showPhotos = false;       // detail view: original photos expanded
 let shareOpen = false, shareMsg = "", shareMsgTone = "var(--accent-ink)";
 let meals = [];               // planned meals for the visible week
@@ -895,6 +897,7 @@ function renderKeepingSearch(boxId, listId, focusBack) {
 }
 const renderPicker = (focusSearch) => renderKeepingSearch("planSearch", "planPickList", focusSearch);
 const renderSaved = (focusSearch) => renderKeepingSearch("savedSearch", null, focusSearch);
+const renderPublic = (focusSearch) => renderKeepingSearch("publicSearch", null, focusSearch);
 
 // Full-screen image overlay. Empty string when nothing is zoomed.
 function lightboxHtml() {
@@ -1145,16 +1148,56 @@ function savedView() {
 function publicView() {
   if (viewing) return recipeDetailView();
   if (!publicRecipes.length) return `<p class="empty">No public recipes yet. Open one of your saved recipes and publish it for everyone.</p>`;
-  return `<div style="margin-bottom:14px">
+  const seg = (k, label) =>
+    `<button data-pubsort="${k}" style="flex:1;border:0;padding:8px 4px;border-radius:8px;font-size:12px;font-weight:500;cursor:pointer;${publicSort === k ? "background:var(--raised);color:var(--text-strong);box-shadow:var(--shadow-sm)" : "background:none;color:var(--muted)"}">${label}</button>`;
+  let html = `<div style="margin-bottom:14px">
       <div style="font-size:17px;font-weight:700">Community recipes</div>
       <p class="meta" style="margin-top:3px">Recipes members chose to share with every account.</p>
-    </div>` + publicRecipes.map((r) => `<div class="row">
+    </div>
+    <div style="position:relative;display:flex;align-items:center;margin-bottom:8px">
+      <input id="publicSearch" value="${esc(publicSearch)}" placeholder="Search recipes, ingredients or cooks…"
+        autocapitalize="none" autocorrect="off"
+        style="width:100%;padding:9px 32px 9px 12px;border:1px solid var(--border-strong);border-radius:10px;font-size:14px" />
+      ${publicSearch ? `<button id="publicSearchClear" title="Clear search"
+        style="position:absolute;right:7px;border:0;background:var(--border);color:var(--text-2);width:22px;height:22px;border-radius:50%;cursor:pointer;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center">✕</button>` : ""}
+    </div>
+    <div style="display:flex;gap:4px;background:var(--tabs-bg);padding:4px;border-radius:12px;margin-bottom:14px">
+      ${seg("recent", "Recent")}${seg("az", "A–Z")}${seg("canmake", "Can make")}${seg("author", "By cook")}
+    </div>`;
+
+  // Search matches title, ingredients or the sharer's name.
+  const q = publicSearch.trim().toLowerCase();
+  const rows = [];
+  for (const r of publicRecipes) {
+    const m = recipeMatch(r, publicSearch);
+    const byCook = q && (r.owner_username || "").toLowerCase().includes(q);
+    if (m.hit || byCook) rows.push({ r, cov: recipeCoverage(r), via: m.hit ? m.via : "" });
+  }
+  const byTitle = (a, b) => (a.r.title || "").localeCompare(b.r.title || "");
+  const frac = (c) => c.total ? c.have / c.total : 0;
+  if (publicSort === "az") rows.sort(byTitle);
+  else if (publicSort === "canmake") rows.sort((a, b) => (frac(b.cov) - frac(a.cov)) || byTitle(a, b));
+  else if (publicSort === "author")
+    rows.sort((a, b) => (a.r.owner_username || "").localeCompare(b.r.owner_username || "") || byTitle(a, b));
+  // "recent" keeps server order (newest first)
+
+  if (!rows.length) return html + `<p class="empty">No public recipes match “${esc(publicSearch)}”.</p>`;
+  if (publicSearch)
+    html += `<p class="meta" style="font-size:11px;text-align:right;margin-bottom:6px">${rows.length} of ${publicRecipes.length}</p>`;
+
+  return html + rows.map(({ r, cov, via }) => {
+    const makeable = cov.total > 0 && cov.have === cov.total;
+    const onHand = publicSort === "canmake"
+      ? (makeable ? ` · <span style="font-weight:600;color:var(--accent-ink)">✓ can make</span>` : ` · ${cov.have}/${cov.total} on hand`)
+      : "";
+    return `<div class="row">
       <span style="flex:1;min-width:0" data-open-public="${r.id}" role="button">
         <span class="name">${esc(r.title)}</span><br>
-        <span class="meta">by ${esc(r.owner_username)}${r.is_owner ? " · yours" : ""} · ${(r.ingredients || []).length} ingredients</span>
+        <span class="meta">by ${esc(r.owner_username)}${r.is_owner ? " · yours" : ""} · ${(r.ingredients || []).length} ingredients${onHand}${via ? ` · has ${esc(via)}` : ""}</span>
       </span>
       <button class="btn btn-sky" data-open-public="${r.id}" style="width:auto;padding:6px 14px">Open</button>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 }
 
 // Render a per-serving nutrition panel from a nutrition object.
@@ -2428,6 +2471,10 @@ function wire() {
     render();
     ensureRecipeTimes();
   });
+  document.querySelectorAll("[data-pubsort]").forEach(b => b.onclick = () => { publicSort = b.dataset.pubsort; render(); });
+  const pbs = $("#publicSearch");
+  if (pbs) pbs.oninput = () => { publicSearch = pbs.value; renderPublic(true); };
+  const pbc = $("#publicSearchClear"); if (pbc) pbc.onclick = () => { publicSearch = ""; renderPublic(true); };
   document.querySelectorAll("[data-open-public]").forEach(b => b.onclick = async () => {
     viewing = await api(`/public-recipes/${b.dataset.openPublic}`);
     if (!viewing || viewing.error) { err = (viewing && viewing.error) || "Couldn't open that recipe."; render(); return; }
