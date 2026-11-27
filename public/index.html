@@ -208,6 +208,7 @@
     <div id="netStatus" class="net-status" role="status" style="display:none"></div>
     <div id="view"></div>
   </div>
+  <p id="appVersion" style="text-align:center;font-size:11px;color:var(--muted-2);margin:28px 0 8px"></p>
 </div>
 
 <script type="module">
@@ -3662,6 +3663,45 @@ boot();
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
 }
+
+// ---------- picking up a new version ----------
+// A home-screen app is rarely reloaded: switching back to it resumes the page
+// that was already open, so a deploy could go unseen for days. Each time the
+// app comes back to the screen it asks the server which version is live, and
+// reloads if that isn't the one it's running — but never mid-cook or mid-typing;
+// then it waits for the next tab change. The list outbox is saved on the phone,
+// so a reload loses nothing.
+// The server writes its version in here as it sends the page (server.js).
+const PAGE_VERSION = "__APP_VERSION__";
+let loadedVersion = PAGE_VERSION.startsWith("__") ? null : PAGE_VERSION, serverVersion = null, updateWaiting = false;
+const busyTyping = () => { const a = document.activeElement; return !!(a && a.matches && a.matches("input, textarea, select")); };
+function reloadForUpdate() {
+  if (cookingNow || busyTyping()) { updateWaiting = true; return; }
+  updateWaiting = false;
+  // On a slow network the service worker may hand back the cached page again;
+  // don't keep reloading into it. One try per new version every two minutes.
+  try {
+    const last = JSON.parse(sessionStorage.getItem("pantry.reloadedFor") || "null");
+    if (last && last.v === serverVersion && Date.now() - last.at < 120000) return;
+    sessionStorage.setItem("pantry.reloadedFor", JSON.stringify({ v: serverVersion, at: Date.now() }));
+  } catch {}
+  const go = () => location.reload();
+  if (navigator.serviceWorker && navigator.serviceWorker.getRegistration) {
+    navigator.serviceWorker.getRegistration().then(r => r && r.update()).catch(() => {}).finally(go);
+  } else go();
+}
+async function checkForUpdate() {
+  let v;
+  try { v = (await apiT("/version", { cache: "no-store" }, 5000)).version; } catch { return; } // offline: keep going
+  if (!v) return;
+  if (!loadedVersion) loadedVersion = v;
+  serverVersion = v;
+  if (v !== loadedVersion) reloadForUpdate();
+}
+{ const el = $("#appVersion"); if (el && loadedVersion) el.textContent = `version ${loadedVersion}`; }
+checkForUpdate();
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") checkForUpdate(); });
+document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => { if (updateWaiting) reloadForUpdate(); }));
 </script>
 </body>
 </html>
