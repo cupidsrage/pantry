@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { speakable, chunks, rankVoices, scoreVoice } from "../lib/speech.js";
+import { speakable, chunks, rankVoices, scoreVoice, voiceLabel } from "../lib/speech.js";
 
 const said = {
   "Add 1 1/2 cups flour.": "Add 1 and a half cups flour.",
@@ -54,4 +54,14 @@ test("natural and premium voices come first, novelty and other languages never",
 test("the reader's own accent wins between otherwise equal voices", () => {
   const ranked = rankVoices([V("Google US English", "en-US"), V("Google UK English Female", "en-GB")], "en-GB");
   assert.equal(ranked[0].lang, "en-GB");
+});
+
+test("an iPhone voice's quality is read from its id when the name leaves it out", () => {
+  const enhanced = V("Zoe", "en-US", { voiceURI: "com.apple.voice.enhanced.en-US.Zoe" });
+  const compact = V("Samantha", "en-US", { voiceURI: "com.apple.voice.compact.en-US.Samantha" });
+  assert.equal(rankVoices([compact, enhanced], "en-US")[0].name, "Zoe");
+  assert.ok(scoreVoice(enhanced) >= 40);
+  assert.equal(voiceLabel(enhanced), "Zoe (Enhanced)");
+  assert.equal(voiceLabel(V("Ava (Premium)", "en-US", { voiceURI: "com.apple.voice.premium.en-US.Ava" })), "Ava (Premium)");
+  assert.equal(voiceLabel(V("Google US English")), "Google US English");
 });

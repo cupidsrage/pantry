@@ -223,7 +223,7 @@ import { planCookAlong, mergeIngredients, cookItems } from "/lib/cookalong.js";
 import { expiryDigest } from "/lib/waste.js";
 import { applyOps, cleanOps, newRef, pendingChanges } from "/lib/offline.js";
 import { SECTIONS, groupBySection, sectionOf } from "/lib/aisles.js";
-import { speakable, chunks, rankVoices, scoreVoice } from "/lib/speech.js";
+import { speakable, chunks, rankVoices, scoreVoice, voiceLabel } from "/lib/speech.js";
 
 const $ = (s, el=document) => el.querySelector(s);
 const api = (p, opt) => fetch("/api" + p, opt).then(r => r.json());
@@ -1723,13 +1723,13 @@ function voicePanel() {
   const natural = best && scoreVoice(best, speechLang()) >= 40;
   const ios = /iPhone|iPad|iPod|Macintosh/.test(navigator.userAgent) && "ontouchend" in document;
   const tip = natural ? "" : `<p class="meta" style="margin-top:8px;line-height:1.45">${ios
-    ? "For a much more natural voice: iPhone Settings → Accessibility → Spoken Content → Voices → English, and download an <b>Enhanced</b> or <b>Premium</b> voice (Ava, Zoe or Evan sound best). Then come back and pick it here."
+    ? "For a much more natural voice: iPhone Settings → Accessibility → Spoken Content → Voices → English, and download an <b>Enhanced</b> voice (Zoe, Ava or Evan). Apple keeps <b>Premium</b> voices for its own apps, so they won't appear here. Then close this app completely and reopen it."
     : "For a much more natural voice: Android Settings → search \"Text-to-speech\" → set the engine to <b>Speech Services by Google</b> and download the voice data. Then come back and pick it here."}</p>`;
-  const opt = v => `<option value="${esc(v.name)}" ${voicePrefs.voice === v.name ? "selected" : ""}>${scoreVoice(v, speechLang()) >= 40 ? "★ " : ""}${esc(v.name)} (${esc(v.lang)})</option>`;
+  const opt = v => `<option value="${esc(v.name)}" ${voicePrefs.voice === v.name ? "selected" : ""}>${scoreVoice(v, speechLang()) >= 40 ? "★ " : ""}${esc(voiceLabel(v))} (${esc(v.lang)})</option>`;
   return `<div style="margin:0 0 12px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:12px">
     <label class="meta" style="display:block;font-weight:600;margin-bottom:4px">Voice</label>
     <select id="voicePick" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:14px">
-      <option value="" ${voicePrefs.voice ? "" : "selected"}>Best available${best ? ` — ${esc(best.name)}` : ""}</option>
+      <option value="" ${voicePrefs.voice ? "" : "selected"}>Best available${best ? ` — ${esc(voiceLabel(best))}` : ""}</option>
       ${voiceList.map(opt).join("")}
     </select>
     <label class="meta" style="display:flex;align-items:center;gap:10px;margin-top:10px">
