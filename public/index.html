@@ -1711,7 +1711,48 @@ if (canSpeak) {
 const pickVoice = () => voiceList.find(v => v.name === voicePrefs.voice) || voiceList[0] || null;
 function saveVoicePrefs() { try { localStorage.setItem(VOICE_KEY, JSON.stringify(voicePrefs)); } catch {} }
 
+// Two engines. "natural": the server's OpenAI voice (GET /api/tts), which
+// sounds like a person but needs a signal and a key on the server. "phone":
+// the phone's own speech, which works anywhere. Natural is used whenever the
+// server offers it, and anything going wrong with it falls back to the phone.
+let tts = { enabled: false, voices: [], voice: "" };   // what the server offers
+async function loadTtsStatus() {
+  try { const r = await apiT("/tts/status", undefined, 6000); if (r && typeof r.enabled === "boolean") tts = r; } catch {}
+  if (voicePanelOpen) render();
+}
+const canRead = () => canSpeak || tts.enabled;
+const useNatural = () => tts.enabled && voicePrefs.engine !== "phone" && !offline;
+const natVoice = () => (tts.voices.includes(voicePrefs.natVoice) ? voicePrefs.natVoice : tts.voice);
+const ttsUrl = text => `/api/tts?v=${encodeURIComponent(natVoice())}&t=${encodeURIComponent(text)}`;
+let audioEl = null, speakSeq = 0;
+// One audio element for the whole session: iPhones only let a page play sound
+// after a tap, and an element that has played once may play again later
+// (cook-together moves on by the clock, not by a tap).
+const player = () => audioEl || (audioEl = Object.assign(new Audio(), { preload: "auto" }));
+
+function stopSpeaking() {
+  speakSeq++;
+  if (audioEl) audioEl.pause();
+  if (canSpeak) speechSynthesis.cancel();
+}
+
 function say(text) {
+  stopSpeaking();
+  if (!useNatural()) return sayOnPhone(text);
+  const seq = speakSeq, a = player();
+  let fellBack = false;
+  const fallBack = () => {           // no signal, server said no, or playback refused
+    if (fellBack || seq !== speakSeq) return;
+    fellBack = true; sayOnPhone(text);
+  };
+  a.onerror = fallBack;
+  a.src = ttsUrl(text);
+  a.defaultPlaybackRate = a.playbackRate = voicePrefs.rate;
+  const p = a.play();
+  if (p && p.catch) p.catch(e => { if (!e || e.name !== "AbortError") fallBack(); });
+}
+
+function sayOnPhone(text) {
   if (!canSpeak) return;
   speechSynthesis.cancel();
   if (!voiceList.length) loadVoices();
@@ -1726,22 +1767,51 @@ function say(text) {
   }
   if (speechSynthesis.paused) speechSynthesis.resume(); // Chrome can leave the queue paused
 }
+
+// Ask the server for the next step's clip while this one plays, so tapping
+// Next doesn't wait on it. Each clip once per session is plenty.
+const prefetched = new Set();
+function prefetchClip(text) {
+  if (!text || !useNatural()) return;
+  const url = ttsUrl(text);
+  if (prefetched.has(url)) return;
+  prefetched.add(url);
+  fetch(url).then(r => r.ok ? r.blob() : null).catch(() => {});
+}
 const VOICE_SAMPLE = "Preheat the oven to 350°F. Whisk 1 1/2 cups flour with 1/2 tsp salt, then bake 25-30 min.";
+const cap = w => w.charAt(0).toUpperCase() + w.slice(1);
 
 function voicePanel() {
+  const natural = useNatural();
   const best = voiceList[0];
-  const natural = best && scoreVoice(best, speechLang()) >= 40;
+  const goodPhoneVoice = best && scoreVoice(best, speechLang()) >= 40;
   const ios = /iPhone|iPad|iPod|Macintosh/.test(navigator.userAgent) && "ontouchend" in document;
-  const tip = natural ? "" : `<p class="meta" style="margin-top:8px;line-height:1.45">${ios
+  const tip = natural || goodPhoneVoice || !canSpeak ? "" : `<p class="meta" style="margin-top:8px;line-height:1.45">${tts.enabled
+    ? "The natural voice sounds far better — switch to it above."
+    : ios
     ? "For a much more natural voice: iPhone Settings → Accessibility → Spoken Content → Voices → English, and download an <b>Enhanced</b> voice (Zoe, Ava or Evan). Apple keeps <b>Premium</b> voices for its own apps, so they won't appear here. Then close this app completely and reopen it."
     : "For a much more natural voice: Android Settings → search \"Text-to-speech\" → set the engine to <b>Speech Services by Google</b> and download the voice data. Then come back and pick it here."}</p>`;
   const opt = v => `<option value="${esc(v.name)}" ${voicePrefs.voice === v.name ? "selected" : ""}>${scoreVoice(v, speechLang()) >= 40 ? "★ " : ""}${esc(voiceLabel(v))} (${esc(v.lang)})</option>`;
-  return `<div style="margin:0 0 12px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:12px">
-    <label class="meta" style="display:block;font-weight:600;margin-bottom:4px">Voice</label>
-    <select id="voicePick" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:14px">
+  const sel = "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:14px";
+  const engine = tts.enabled ? `
+    <label class="meta" style="display:block;font-weight:600;margin-bottom:4px">Reader</label>
+    <select id="voiceEngine" style="${sel};margin-bottom:10px">
+      <option value="natural" ${voicePrefs.engine !== "phone" ? "selected" : ""}>✨ Natural voice (needs signal)</option>
+      <option value="phone" ${voicePrefs.engine === "phone" ? "selected" : ""}>📱 Phone's own voice</option>
+    </select>` : "";
+  const picker = voicePrefs.engine !== "phone" && tts.enabled ? `
+    <select id="natVoicePick" style="${sel}">
+      ${tts.voices.map(v => `<option value="${esc(v)}" ${v === natVoice() ? "selected" : ""}>${esc(cap(v))}${v === tts.voice ? " (default)" : ""}</option>`).join("")}
+    </select>
+    ${offline ? `<p class="meta" style="margin-top:6px">No signal right now, so the phone's own voice is reading.</p>` : ""}` : `
+    <select id="voicePick" style="${sel}">
       <option value="" ${voicePrefs.voice ? "" : "selected"}>Best available${best ? ` — ${esc(voiceLabel(best))}` : ""}</option>
       ${voiceList.map(opt).join("")}
-    </select>
+    </select>`;
+  return `<div style="margin:0 0 12px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:12px">
+    ${engine}
+    <label class="meta" style="display:block;font-weight:600;margin-bottom:4px">Voice</label>
+    ${picker}
     <label class="meta" style="display:flex;align-items:center;gap:10px;margin-top:10px">
       <span style="font-weight:600">Speed</span>
       <input id="voiceRate" type="range" min="0.7" max="1.3" step="0.05" value="${voicePrefs.rate}" style="flex:1">
@@ -1752,11 +1822,12 @@ function voicePanel() {
   </div>`;
 }
 function syncSpeech() {
-  if (!canSpeak) return;
-  if (!cookingNow) { if (spokenKey) { spokenKey = null; speechSynthesis.cancel(); } return; }
+  if (!canRead()) return;
+  if (!cookingNow) { if (spokenKey) { spokenKey = null; stopSpeaking(); } return; }
   if (!readAloud || !speakTarget || speakTarget.key === spokenKey) return;
   spokenKey = speakTarget.key;
   say(speakTarget.text);
+  prefetchClip(speakTarget.next);
 }
 
 // The strip of controls both cooking screens show.
@@ -1764,20 +1835,21 @@ function cookAidsBar() {
   const chip = "font-size:12px;border:1px solid var(--border);border-radius:999px;padding:5px 11px;background:var(--surface);color:var(--text-2)";
   return `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:10px 0">
     ${canWake ? `<span style="${chip}" title="The phone won't lock while this screen is open">🔆 Screen stays on</span>` : ""}
-    ${canSpeak ? `
+    ${canRead() ? `
       <button class="ic" id="readAloudToggle" aria-pressed="${readAloud}" style="${chip};cursor:pointer;${readAloud ? "border-color:var(--accent);color:var(--accent-ink);font-weight:600" : ""}">
         🔊 Read steps aloud: ${readAloud ? "on" : "off"}</button>
       ${speakTarget ? `<button class="ic" id="readAgain" style="${chip};cursor:pointer">↻ Read this step</button>` : ""}
       <button class="ic" id="voiceSettings" aria-expanded="${voicePanelOpen}" style="${chip};cursor:pointer">🎙 Voice</button>` : ""}
   </div>
-  ${canSpeak && voicePanelOpen ? voicePanel() : ""}`;
+  ${canRead() && voicePanelOpen ? voicePanel() : ""}`;
 }
 
 function cookModeView() {
   const r = viewing, n = r.steps.length, i = cookStep;
   const last = i === n - 1;
   cookingNow = true;
-  speakTarget = { key: `${r.id}:${i}`, text: `Step ${i + 1}. ${r.steps[i]}` };
+  speakTarget = { key: `${r.id}:${i}`, text: `Step ${i + 1}. ${r.steps[i]}`,
+    next: i + 1 < n ? `Step ${i + 2}. ${r.steps[i + 1]}` : "" };
   return `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
       <span class="name" style="font-weight:600;font-size:16px">${esc(r.title)}</span>
@@ -2096,7 +2168,8 @@ function cookRunView() {
   cookingNow = true;
   // Only once the session has started: reading out a step for tomorrow's dinner isn't help.
   speakTarget = current && now >= p.startAt - 60000
-    ? { key: `ca:${current.key}`, text: `${current.dishTitle}. ${current.text}` } : null;
+    ? { key: `ca:${current.key}`, text: `${current.dishTitle}. ${current.text}`,
+        next: (n => n ? `${n.dishTitle}. ${n.text}` : "")(left[left.indexOf(current) + 1]) } : null;
   // The now-line only belongs inside the session. Before it starts, the clock
   // says nothing useful — "NOW 10pm" above a schedule for tomorrow's dinner just
   // reads as a bug.
@@ -2834,15 +2907,21 @@ function wire() {
     readAloud = !readAloud;
     try { localStorage.setItem(READ_KEY, readAloud ? "1" : "0"); } catch {}
     spokenKey = null;                      // turning it on reads the step you're on
-    if (!readAloud && canSpeak) speechSynthesis.cancel();
+    if (!readAloud) stopSpeaking();
     render();
   };
   const rag = $("#readAgain"); if (rag) rag.onclick = () => { if (speakTarget) say(speakTarget.text); };
   const vset = $("#voiceSettings"); if (vset) vset.onclick = () => { voicePanelOpen = !voicePanelOpen; loadVoices(); render(); };
   const vpick = $("#voicePick"); if (vpick) vpick.onchange = () => { voicePrefs.voice = vpick.value; saveVoicePrefs(); say(VOICE_SAMPLE); };
+  const veng = $("#voiceEngine"); if (veng) veng.onchange = () => { voicePrefs.engine = veng.value; saveVoicePrefs(); render(); say(VOICE_SAMPLE); };
+  const npick = $("#natVoicePick"); if (npick) npick.onchange = () => { voicePrefs.natVoice = npick.value; saveVoicePrefs(); say(VOICE_SAMPLE); };
   const vrate = $("#voiceRate"); if (vrate) {
     // Update the label in place while dragging; a full redraw would drop the slider.
-    vrate.oninput = () => { voicePrefs.rate = +vrate.value; const l = $("#voiceRateLabel"); if (l) l.textContent = `${voicePrefs.rate.toFixed(2)}×`; };
+    vrate.oninput = () => {
+      voicePrefs.rate = +vrate.value;
+      const l = $("#voiceRateLabel"); if (l) l.textContent = `${voicePrefs.rate.toFixed(2)}×`;
+      if (audioEl) audioEl.playbackRate = voicePrefs.rate;  // the natural voice changes speed as it plays
+    };
     vrate.onchange = () => { saveVoicePrefs(); say(VOICE_SAMPLE); };
   }
   const vtest = $("#voiceTest"); if (vtest) vtest.onclick = () => say(VOICE_SAMPLE);
@@ -3593,6 +3672,7 @@ async function startApp(user) {
   loadMeals().catch(() => {});                              // in the background: the Pantry tab's
                                                             // "use it up" strip needs the week
   initPush().then(() => { if (tab === "plan") render(); }).catch(() => {}); // never gates the UI
+  loadTtsStatus().then(() => { if (cookingNow) render(); });  // is the natural voice on?
   restoreCookAlong();                                       // ditto: dinner may already be in progress
 }
 
