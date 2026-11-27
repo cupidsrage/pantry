@@ -51,3 +51,12 @@ test("the service worker precaches the shared modules", async () => {
     assert.ok(shell[1].includes(`"${path}"`), `sw.js SHELL is missing ${path}`);
   }
 });
+
+test("no regex lookbehind in code the browser loads (older iPhones can't parse it)", () => {
+  // Safari only learned (?<=...) in iOS 16.4. On an older phone one such regex
+  // is a syntax error that stops the whole page, not just the feature.
+  const files = [["index.html", blocks[0][2]], ["sw.js", readFileSync(join(root, "public", "sw.js"), "utf8")]];
+  const libs = [...blocks[0][2].matchAll(/from\s*"(\/lib\/[^"]+)"/g)].map((m) => m[1]);
+  for (const lib of new Set(libs)) files.push([lib, readFileSync(join(root, lib.replace(/^\//, "")), "utf8")]);
+  for (const [name, src] of files) assert.doesNotMatch(src, /\(\?<[=!]/, `${name} uses a lookbehind`);
+});

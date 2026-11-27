@@ -3,6 +3,7 @@ import Database from "better-sqlite3";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import crypto from "crypto";
+import { readFileSync } from "fs";
 
 // Logic shared with the browser — see lib/units.js. Served at /lib below so the
 // front end runs the exact same code rather than a second copy of the rules.
@@ -22,6 +23,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json({ limit: "25mb" })); // photos arrive as base64 in the body
 app.use("/lib", express.static(join(__dirname, "lib")));
+
+// Changes on every deploy, so an open app can tell it's out of date and reload.
+// Railway sets the commit; anywhere else, the moment this server started.
+const VERSION = (process.env.RAILWAY_GIT_COMMIT_SHA || "").slice(0, 7) || `dev-${Date.now().toString(36)}`;
+// The page is stamped with the version it came from, so even a copy the
+// service worker served from its cache knows how old it is.
+const INDEX_HTML = readFileSync(join(__dirname, "public", "index.html"), "utf8").replaceAll("__APP_VERSION__", VERSION);
+app.get(["/", "/index.html"], (_, res) => {
+  res.setHeader("Cache-Control", "no-cache");
+  res.type("html").send(INDEX_HTML);
+});
 app.use(
   express.static(join(__dirname, "public"), {
     setHeaders(res, path) {
@@ -1881,7 +1893,7 @@ const jsonText = (v, fallback) => {
   return typeof v === "string" ? v : JSON.stringify(v);
 };
 
-app.get("/api/version", (_, res) => res.json({ version: "pantry-2026-08-03b" }));
+app.get("/api/version", (_, res) => { res.setHeader("Cache-Control", "no-store"); res.json({ version: VERSION }); });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Pantry running on ${PORT} [pantry-2026-08-03b]`));
+app.listen(PORT, () => console.log(`Pantry running on ${PORT} [${VERSION}]`));
