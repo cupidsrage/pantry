@@ -378,7 +378,9 @@ first, the phone's novelty voices never. The best voices usually need a
 one-time download on the phone itself:
 
 - **iPhone:** Settings → Accessibility → Spoken Content → Voices → English →
-  download an *Enhanced* or *Premium* voice (Ava, Zoe or Evan).
+  download an *Enhanced* voice (Zoe, Ava or Evan), then close the app fully and
+  reopen it. Apple keeps *Premium* voices for its own apps; websites and
+  home-screen apps can't use them, so they won't appear in the list.
 - **Android:** Settings → Text-to-speech → engine *Speech Services by Google*,
   and install its voice data.
 
