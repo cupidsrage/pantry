@@ -117,6 +117,7 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html { background: var(--bg); }
   body { font-family: ui-sans-serif, system-ui, sans-serif; color: var(--text); min-height: 100vh; }
+  .net-status { font-size: 12px; line-height: 1.4; color: var(--text-2); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 10px; padding: 7px 10px; margin: 0 0 12px; }
   /* Four fixed layers of atmosphere, all pointer-transparent, all switched off
      by the daylight theme setting their images to none. */
   html::before, html::after, body::before, body::after { content: ""; position: fixed; pointer-events: none; }
@@ -204,6 +205,7 @@
       <button class="tab" data-tab="public">Public</button>
       <button class="tab" data-tab="plan">Plan</button>
     </div>
+    <div id="netStatus" class="net-status" role="status" style="display:none"></div>
     <div id="view"></div>
   </div>
 </div>
@@ -218,9 +220,20 @@ import { recipeCoverage as coverageOf, recipeSoonestExpiry as soonestExpiryOf, r
 import { parseDurations } from "/lib/durations.js";
 import { planCookAlong, mergeIngredients, cookItems } from "/lib/cookalong.js";
 import { expiryDigest } from "/lib/waste.js";
+import { applyOps, cleanOps, newRef, pendingChanges } from "/lib/offline.js";
+import { SECTIONS, groupBySection, sectionOf } from "/lib/aisles.js";
 
 const $ = (s, el=document) => el.querySelector(s);
 const api = (p, opt) => fetch("/api" + p, opt).then(r => r.json());
+// The same, but it gives up after `ms`. In a store the phone often has "one
+// bar": the request neither answers nor fails, and without a deadline the app
+// would sit there instead of carrying on from what it has saved.
+function fetchT(path, opt = {}, ms = 8000) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ms);
+  return fetch(path, { ...opt, signal: ctl.signal }).finally(() => clearTimeout(t));
+}
+const apiT = (p, opt, ms) => fetchT("/api" + p, opt, ms).then(r => r.json());
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const wm = n => `https://www.walmart.com/search?q=${encodeURIComponent(n)}`;
 const J = o => ({ method: o.m, headers: { "content-type": "application/json" }, body: JSON.stringify(o.b) });
@@ -799,12 +812,120 @@ let pantryUse = null;         // open "remove some" editor: {name, amt, unit} or
 let receiptBusy = false, receiptItems = null;
 let spendOpen = false, spend = null;   // grocery-spend panel: open state + last /spend payload
 
+// ---------- offline copy + list outbox ----------
+// The list, pantry and saved recipes are kept on the phone as well, so the app
+// opens and the list works with no signal. Every list change goes through
+// changeList(): it shows at once, waits in `outbox`, and is sent to the server
+// by flushList() whenever the server answers. lib/offline.js has the rules.
+const LOCAL_KEY = u => `pantry.offline.${u}`;
+const LAST_USER_KEY = "pantry.lastUser";
+let me = null;                // logged-in username — whose copy this is
+let outbox = [];              // list ops the server hasn't confirmed yet
+let offline = false;          // the last request to the server failed
+let listVersion = 0;          // bumps whenever `list` changes locally or from a sync
+
+function saveLocal() {
+  if (!me) return;
+  // Recipe photos are big and localStorage is ~5 MB, so the saved copy goes
+  // without them; they come back the next time the server answers.
+  const lean = saved.map(({ photos, ...r }) => r);
+  const write = o => localStorage.setItem(LOCAL_KEY(me), JSON.stringify({ ...o, at: Date.now() }));
+  try { write({ list, pantry, saved: lean, outbox }); }
+  catch { try { write({ list, pantry, saved: [], outbox }); } catch {} } // full: the list matters most
+}
+function loadLocal(user) {
+  try {
+    const o = JSON.parse(localStorage.getItem(LOCAL_KEY(user)) || "null");
+    if (!o) return false;
+    list = Array.isArray(o.list) ? o.list : [];
+    pantry = Array.isArray(o.pantry) ? o.pantry : [];
+    saved = Array.isArray(o.saved) ? o.saved : [];
+    outbox = Array.isArray(o.outbox) ? o.outbox : [];
+    return true;
+  } catch { return false; }
+}
+function forgetLocal(user) {
+  try { localStorage.removeItem(LOCAL_KEY(user)); localStorage.removeItem(LAST_USER_KEY); } catch {}
+}
+
+function setOffline(v) {
+  if (offline === v) { netStatus(); return; }
+  offline = v;
+  netStatus();
+  if (tab === "list") render(); // the list's own note changes with it
+}
+// A one-line strip under the tabs. It lives outside #view so it can change
+// without redrawing whatever is being typed into.
+function netStatus() {
+  const el = $("#netStatus");
+  if (!el) return;
+  const n = pendingChanges(outbox);
+  const waiting = n ? ` ${n} list change${n === 1 ? "" : "s"} will sync when you're back.` : "";
+  el.textContent = offline ? `📶 Offline — showing what's saved on this phone.${waiting}`
+    : n ? `Syncing ${n} list change${n === 1 ? "" : "s"}…` : "";
+  el.style.display = el.textContent ? "block" : "none";
+}
+
+// Make one or more list changes: show them now, sync them when possible.
+function changeList(ops) {
+  const clean = cleanOps([].concat(ops));
+  if (!clean.length) return;
+  outbox.push(...clean);
+  list = applyOps(list, clean);
+  listVersion++;
+  saveLocal(); netStatus();
+  if (tab === "list") render();
+  flushList();
+}
+
+let flushing = null;
+function flushList() { return flushing || (flushing = doFlush().finally(() => { flushing = null; })); }
+async function doFlush() {
+  let movedAny = false;
+  while (outbox.length) {
+    const batch = outbox.slice();
+    let r;
+    try {
+      const res = await fetchT("/api/list/sync", J({ m: "POST", b: { ops: batch } }), 10000);
+      if (res.status === 401) { setOffline(false); showAuth(); return; } // kept: syncs after logging back in
+      if (res.status === 400) { outbox = outbox.slice(batch.length); saveLocal(); continue; } // never wedge the queue
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      r = await res.json();
+    } catch { setOffline(true); saveLocal(); return; }
+    // Ops made while this batch was in flight are still queued; lay them back
+    // over the server's answer so they don't blink out until the next sync.
+    outbox = outbox.slice(batch.length);
+    list = applyOps(r.list, outbox);
+    listVersion++;
+    if (r.moved) movedAny = true;
+    setOffline(false); saveLocal();
+    if (tab === "list") render();
+  }
+  netStatus();
+  // Bought items landed in the pantry on the server; fetch it so the Pantry tab knows.
+  if (movedAny) {
+    try { const p = await apiT("/pantry"); if (Array.isArray(p)) { pantry = p; saveLocal(); if (tab === "pantry") render(); } } catch {}
+  }
+}
+// Try again when the phone says it's back, when the app comes to the front,
+// and every 20 s while anything is waiting.
+window.addEventListener("online", () => { if (me) refresh(); });
+document.addEventListener("visibilitychange", () => { if (me && document.visibilityState === "visible" && (outbox.length || offline)) refresh(); });
+setInterval(() => { if (me && outbox.length) flushList(); }, 20000);
+
 async function refresh() {
-  const [p, l, s] = await Promise.all([api("/pantry"), api("/list"), api("/recipes")]);
+  if (outbox.length) await flushList();
+  const v = listVersion;
+  let p, l, s;
+  try { [p, l, s] = await Promise.all([apiT("/pantry"), apiT("/list"), apiT("/recipes")]); }
+  catch { setOffline(true); render(); return; } // carry on with the copy on the phone
   if (!Array.isArray(p) || !Array.isArray(l) || !Array.isArray(s)) { // session gone
     showAuth(); return;
   }
-  pantry = p; list = l; saved = s;
+  pantry = p; saved = s;
+  // A sync that finished while these were loading has the newer list.
+  if (v === listVersion) list = applyOps(l, outbox);
+  setOffline(false); saveLocal();
   render();
 }
 
@@ -866,6 +987,7 @@ document.querySelectorAll(".tab").forEach(b =>
   });
 
 function render() {
+  cookingNow = false; speakTarget = null; // the cooking views set these as they draw
   $("#view").innerHTML =
     (tab === "recipe" ? recipeView() :
     tab === "list" ? listView() :
@@ -876,6 +998,7 @@ function render() {
   // keep the timer stack clear of the content behind it
   document.body.style.paddingBottom = timers.length ? `${timers.length * 72 + 26}px` : "";
   wire();
+  syncWakeLock(); syncSpeech();
 }
 
 // render() replaces the whole view, which would drop a search box's caret and
@@ -1525,9 +1648,67 @@ function cookIngredientsPanel(r) {
     </div>`;
 }
 
+// ---------- hands-free while cooking ----------
+// While a cooking screen is up the phone shouldn't lock, and it can read each
+// step out as you reach it. The cooking views say they're up (cookingNow) and
+// which step is on screen (speakTarget) as they draw; render() then takes or
+// lets go of the screen lock and speaks a step it hasn't spoken yet.
+const READ_KEY = "pantry.readAloud";
+const canWake = "wakeLock" in navigator;
+const canSpeak = "speechSynthesis" in window && typeof SpeechSynthesisUtterance !== "undefined";
+let cookingNow = false, speakTarget = null, spokenKey = null;
+let readAloud = (() => { try { return localStorage.getItem(READ_KEY) === "1"; } catch { return false; } })();
+let wakeLock = null, wakeAsking = false;
+
+async function syncWakeLock() {
+  if (!canWake) return;
+  const want = cookingNow && document.visibilityState === "visible";
+  if (want && !wakeLock && !wakeAsking) {
+    wakeAsking = true;
+    try {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => { wakeLock = null; });
+    } catch { /* low battery mode, or the browser said no — the screen just locks as usual */ }
+    wakeAsking = false;
+    if (!cookingNow && wakeLock) syncWakeLock(); // cooking ended while we were asking
+  } else if (!want && wakeLock) {
+    const l = wakeLock; wakeLock = null; l.release().catch(() => {});
+  }
+}
+// The browser drops the lock whenever the app goes to the background; take it
+// back when it returns (if still cooking).
+document.addEventListener("visibilitychange", () => syncWakeLock());
+
+function say(text) {
+  if (!canSpeak) return;
+  speechSynthesis.cancel();
+  speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+}
+function syncSpeech() {
+  if (!canSpeak) return;
+  if (!cookingNow) { if (spokenKey) { spokenKey = null; speechSynthesis.cancel(); } return; }
+  if (!readAloud || !speakTarget || speakTarget.key === spokenKey) return;
+  spokenKey = speakTarget.key;
+  say(speakTarget.text);
+}
+
+// The strip of controls both cooking screens show.
+function cookAidsBar() {
+  const chip = "font-size:12px;border:1px solid var(--border);border-radius:999px;padding:5px 11px;background:var(--surface);color:var(--text-2)";
+  return `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:10px 0">
+    ${canWake ? `<span style="${chip}" title="The phone won't lock while this screen is open">🔆 Screen stays on</span>` : ""}
+    ${canSpeak ? `
+      <button class="ic" id="readAloudToggle" aria-pressed="${readAloud}" style="${chip};cursor:pointer;${readAloud ? "border-color:var(--accent);color:var(--accent-ink);font-weight:600" : ""}">
+        🔊 Read steps aloud: ${readAloud ? "on" : "off"}</button>
+      ${speakTarget ? `<button class="ic" id="readAgain" style="${chip};cursor:pointer">↻ Read this step</button>` : ""}` : ""}
+  </div>`;
+}
+
 function cookModeView() {
   const r = viewing, n = r.steps.length, i = cookStep;
   const last = i === n - 1;
+  cookingNow = true;
+  speakTarget = { key: `${r.id}:${i}`, text: `Step ${i + 1}. ${r.steps[i]}` };
   return `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
       <span class="name" style="font-weight:600;font-size:16px">${esc(r.title)}</span>
@@ -1540,6 +1721,7 @@ function cookModeView() {
     <div style="font-size:22px;line-height:1.4;min-height:120px;padding:20px;background:var(--surface);border:1px solid var(--border);border-radius:16px">
       ${esc(r.steps[i])}
     </div>
+    ${cookAidsBar()}
     ${timerButtons(r.steps[i])}
     ${cookIngredientsPanel(r)}
     <div class="actions" style="margin-top:20px">
@@ -1842,6 +2024,10 @@ function cookRunView() {
 
   // The step you should be on: the first unfinished one whose time has come.
   const current = left.find(e => e.start <= now + 60000) || left[0] || null;
+  cookingNow = true;
+  // Only once the session has started: reading out a step for tomorrow's dinner isn't help.
+  speakTarget = current && now >= p.startAt - 60000
+    ? { key: `ca:${current.key}`, text: `${current.dishTitle}. ${current.text}` } : null;
   // The now-line only belongs inside the session. Before it starts, the clock
   // says nothing useful — "NOW 10pm" above a schedule for tomorrow's dinner just
   // reads as a bug.
@@ -1893,6 +2079,7 @@ function cookRunView() {
       <span class="name" style="font-weight:600;font-size:15px">${G("🔥 The feast", "🍳 Cook together")}</span>
       <button class="ic del" id="cookDiscard" title="end this session">🗑</button>
     </div>
+    ${cookAidsBar()}
 
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:12px 14px">
       <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px">
@@ -1970,27 +2157,58 @@ function cookPrepPanel() {
     </div>`;
 }
 
-function listView() {
-  if (!list.length) return `<p class="empty">${G("Nothing to hunt yet. Take a recipe's ingredients from the Recipe tab.", "Nothing on the list yet. Add a recipe's ingredients from the Recipe tab.")}</p>`;
-  let shop = shopping ? shopView() + `<div style="height:16px"></div>` : "";
-  let html = shop + list.map(it => `
+// Where someone has moved an item before ("tahini lives in Baking at my
+// store"), so the next time it's added it goes straight there. Per phone.
+const AISLE_KEY = "pantry.aisles";
+let movingItem = null;        // list row id whose "move to section" chips are open
+const learnedAisles = () => { try { return JSON.parse(localStorage.getItem(AISLE_KEY) || "{}") || {}; } catch { return {}; } };
+function learnAisle(name, key) {
+  const m = learnedAisles();
+  if (key) m[norm(name)] = key; else delete m[norm(name)];
+  try { localStorage.setItem(AISLE_KEY, JSON.stringify(m)); } catch {}
+}
+
+function listRowHtml(it) {
+  const id = esc(String(it.id));
+  const here = sectionOf(it);
+  const picker = movingItem === String(it.id) ? `
+    <div class="row" style="margin-top:-1px;border-top-left-radius:0;border-top-right-radius:0;background:var(--bg);gap:6px;flex-wrap:wrap">
+      <span class="meta" style="flex-basis:100%">Move ${esc(it.name)} to…</span>
+      ${SECTIONS.map(sec => `<button class="ic" data-lsection="${id}" data-key="${sec.key}"
+        style="font-size:12px;border:1px solid ${sec.key === here ? "var(--accent)" : "var(--border)"};border-radius:999px;padding:5px 10px;${sec.key === here ? "color:var(--accent-ink);font-weight:600" : ""}">${sec.icon} ${esc(sec.label)}</button>`).join("")}
+    </div>` : "";
+  return `
     <div class="row ${it.checked ? "checked" : ""}">
-      <button class="check ${it.checked ? "on" : ""}" data-check="${it.id}">${it.checked ? "✓" : ""}</button>
+      <button class="check ${it.checked ? "on" : ""}" data-check="${id}">${it.checked ? "✓" : ""}</button>
       <span style="flex:1">
         <span class="name ${it.checked ? "done" : ""}">${esc(it.name)}</span><br>
         <span class="meta">${esc(it.pkg_label)}</span>
       </span>
-      <button class="ic" data-lqty="${it.id}" data-d="-1">−</button>
+      <button class="ic" data-lqty="${id}" data-d="-1">−</button>
       <span class="qty">${it.packages} ×</span>
-      <button class="ic" data-lqty="${it.id}" data-d="1">+</button>
+      <button class="ic" data-lqty="${id}" data-d="1">+</button>
+      <button class="ic" data-lmove="${id}" title="move to another store section" aria-label="move to another store section">⇅</button>
       <a class="ic link" href="${wm(it.name)}" target="_blank" rel="noreferrer" title="Find on Walmart">↗</a>
-      <button class="ic del" data-ldel="${it.id}">🗑</button>
-    </div>`).join("");
+      <button class="ic del" data-ldel="${id}">🗑</button>
+    </div>${picker}`;
+}
+
+function listView() {
+  if (!list.length) return `<p class="empty">${G("Nothing to hunt yet. Take a recipe's ingredients from the Recipe tab.", "Nothing on the list yet. Add a recipe's ingredients from the Recipe tab.")}</p>`;
+  let shop = shopping ? shopView() + `<div style="height:16px"></div>` : "";
+  // In the order you walk the store, so it's one pass round, not back and forth.
+  let html = shop + groupBySection(list).map(g => {
+    const left = g.items.filter(x => !x.checked).length;
+    return `<div class="meta" style="font-weight:600;letter-spacing:.04em;margin:14px 0 6px;display:flex;justify-content:space-between">
+        <span>${g.icon} ${esc(g.label.toUpperCase())}</span><span>${left ? `${left} to get` : "all got ✓"}</span>
+      </div>` + g.items.map(listRowHtml).join("");
+  }).join("");
   html += `<div class="actions">
     <button class="btn btn-green" id="purchase" ${list.some(x => x.checked) ? "" : "disabled"}>${G("Carry the spoils down to the cellar", "Mark checked as purchased → Pantry")}</button>
     <button class="btn btn-sky" id="shop" style="width:auto;padding:10px 16px" ${list.some(x => !x.checked) ? "" : "disabled"}>🛒 Shop on Walmart</button>
   </div>
-  <p style="font-size:12px;color:var(--muted-2);margin-top:8px;text-align:center">${G("What you bring home goes down whole — the full package joins your stock.", "Buying adds the full package to your pantry stock.")}</p>`;
+  <p style="font-size:12px;color:var(--muted-2);margin-top:8px;text-align:center">${G("What you bring home goes down whole — the full package joins your stock.", "Buying adds the full package to your pantry stock.")}${
+    offline ? " With no signal, ticks are kept on this phone and bought items reach the pantry once you're back online." : ""}</p>`;
   return html;
 }
 
@@ -2543,6 +2761,14 @@ function wire() {
   document.querySelectorAll("[data-castep]").forEach(b => b.onclick = () => toggleCookStep(b.dataset.castep));
   const cPrep = $("#cookPrepToggle"); if (cPrep) cPrep.onclick = () => { cookAlong.prepOpen = !cookAlong.prepOpen; render(); };
   const cFin = $("#cookFinish"); if (cFin) cFin.onclick = finishCookAlong;
+  const rat = $("#readAloudToggle"); if (rat) rat.onclick = () => {
+    readAloud = !readAloud;
+    try { localStorage.setItem(READ_KEY, readAloud ? "1" : "0"); } catch {}
+    spokenKey = null;                      // turning it on reads the step you're on
+    if (!readAloud && canSpeak) speechSynthesis.cancel();
+    render();
+  };
+  const rag = $("#readAgain"); if (rag) rag.onclick = () => { if (speakTarget) say(speakTarget.text); };
 
   const scaleItems = () => viewing.ingredients.map(i => ({ ...i, use_base: i.use_base * servings }));
   const rtl = $("#rToList"); if (rtl) rtl.onclick = () => addToList(scaleItems());
@@ -2570,17 +2796,32 @@ function wire() {
     render();
   };
 
-  document.querySelectorAll("[data-check]").forEach(b => b.onclick = async () => {
-    const it = list.find(x => x.id == b.dataset.check);
-    await api(`/list/${it.id}`, J({ m: "PATCH", b: { checked: !it.checked } })); refresh();
+  // List rows answer to a server id or, if made with no signal, the phone's own
+  // id — so find the row and hand its real id (number or string) to the op.
+  const listRow = key => list.find(x => String(x.id) === key);
+  document.querySelectorAll("[data-check]").forEach(b => b.onclick = () => {
+    const it = listRow(b.dataset.check); if (!it) return;
+    changeList({ op: "set", ref: it.id, checked: !it.checked });
   });
-  document.querySelectorAll("[data-lqty]").forEach(b => b.onclick = async () => {
-    const it = list.find(x => x.id == b.dataset.lqty);
-    const p = Math.max(1, it.packages + (+b.dataset.d));
-    await api(`/list/${it.id}`, J({ m: "PATCH", b: { packages: p } })); refresh();
+  document.querySelectorAll("[data-lqty]").forEach(b => b.onclick = () => {
+    const it = listRow(b.dataset.lqty); if (!it) return;
+    changeList({ op: "set", ref: it.id, packages: Math.max(1, it.packages + (+b.dataset.d)) });
   });
-  document.querySelectorAll("[data-ldel]").forEach(b => b.onclick = async () => { await api(`/list/${b.dataset.ldel}`, { method: "DELETE" }); refresh(); });
-  const pu = $("#purchase"); if (pu) pu.onclick = async () => { await api("/purchase", { method: "POST" }); refresh(); };
+  document.querySelectorAll("[data-ldel]").forEach(b => b.onclick = () => {
+    const it = listRow(b.dataset.ldel); if (it) changeList({ op: "delete", ref: it.id });
+  });
+  document.querySelectorAll("[data-lmove]").forEach(b => b.onclick = () => {
+    movingItem = movingItem === b.dataset.lmove ? null : b.dataset.lmove; render();
+  });
+  document.querySelectorAll("[data-lsection]").forEach(b => b.onclick = () => {
+    const it = listRow(b.dataset.lsection); if (!it) return;
+    movingItem = null;
+    learnAisle(it.name, b.dataset.key);
+    changeList({ op: "set", ref: it.id, section: b.dataset.key });
+    render();
+  });
+  const pu = $("#purchase"); if (pu) pu.onclick = () =>
+    changeList({ op: "purchase", refs: list.filter(x => x.checked).map(x => x.id) });
   const sh = $("#shop"); if (sh) sh.onclick = () => {
     shopping = true;
     const first = list.find(x => !x.checked);
@@ -2588,8 +2829,8 @@ function wire() {
     render();
   };
   const sc = $("#shopClose"); if (sc) sc.onclick = () => { shopping = false; render(); };
-  document.querySelectorAll("[data-scheck]").forEach(b => b.onclick = async () => {
-    await api(`/list/${b.dataset.scheck}`, J({ m: "PATCH", b: { checked: true } })); refresh();
+  document.querySelectorAll("[data-scheck]").forEach(b => b.onclick = () => {
+    const it = listRow(b.dataset.scheck); if (it) changeList({ op: "set", ref: it.id, checked: true });
   });
 
   const pa = $("#padd"); if (pa) pa.onclick = addPantry;
@@ -3013,6 +3254,7 @@ async function addToList(items, ignoreStock = false) {
   try {
     if (!items || !items.length) { err = "No ingredients to add."; render(); return; }
     let added = 0, skipped = [];
+    const ops = [];
     for (const p of items) {
       const useBase = Number(p.use_base) || 0;
       const pkgBase = Number(p.pkg_base) || 1;
@@ -3020,15 +3262,14 @@ async function addToList(items, ignoreStock = false) {
       const needBase = ignoreStock ? useBase : useBase - haveBase;
       if (needBase <= 0) { skipped.push(p.name); continue; }
       const packages = Math.max(1, Math.ceil(needBase / pkgBase));
-      const existing = list.find(x => norm(x.name) === norm(p.name));
-      if (existing) await api(`/list/${existing.id}`, J({ m: "PATCH", b: { packages: existing.packages + packages } }));
-      else await api("/list", J({ m: "POST", b: {
-        name: p.name, packages, base_unit: p.base_unit || "count", pkg_label: p.pkg_label || "each", pkg_base: pkgBase
-      }}));
+      // Earlier lines of this same recipe count too ("2 eggs" then "1 egg").
+      const existing = applyOps(list, ops).find(x => norm(x.name) === norm(p.name));
+      if (existing) ops.push({ op: "set", ref: existing.id, packages: existing.packages + packages });
+      else ops.push({ op: "add", ref: newRef(), section: learnedAisles()[norm(p.name)] || "",
+        name: p.name, packages, base_unit: p.base_unit || "count", pkg_label: p.pkg_label || "each", pkg_base: pkgBase });
       added++;
     }
     if (added === 0) {
-      await refresh();
       err = skipped.length
         ? `Already stocked: ${skipped.join(", ")}. Use “Add all” to add them anyway.`
         : "Nothing selected to add.";
@@ -3038,7 +3279,8 @@ async function addToList(items, ignoreStock = false) {
     err = "";
     parsed = null; rawRecipe = ""; recipeUrl = ""; viewing = null; tab = "list";
     document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "list"));
-    refresh();
+    changeList(ops); // shows on the list now, with or without signal
+    render();
   } catch (e) {
     err = "Couldn't add to the list: " + (e && e.message ? e.message : e);
     render();
@@ -3251,26 +3493,53 @@ async function submitAuth() {
   const invite = ($("#authInvite") || {}).value || "";
   authErr = "";
   const path = authMode === "register" ? "/register" : "/login";
-  const r = await api(path, J({ m: "POST", b: { username, password, invite } }));
+  let r;
+  try { r = await api(path, J({ m: "POST", b: { username, password, invite } })); }
+  catch { authErr = "Can't reach the server — check your signal and try again."; showAuth(); return; }
   if (r.error) { authErr = r.error; showAuth(); return; }
-  await startApp();
+  const who = await api("/me").catch(() => null);
+  await startApp((who && who.user) || username.trim().toLowerCase());
 }
 
-async function startApp() {
+async function startApp(user) {
   $("#auth").style.display = "none";
   $("#app").style.display = "block";
   tab = "recipe"; viewing = null;
-  await refresh();
-  loadMeals();                                              // in the background: the Pantry tab's
+  if (me !== user) { list = []; pantry = []; saved = []; outbox = []; }
+  me = user;
+  try { localStorage.setItem(LAST_USER_KEY, user); } catch {}
+  // Draw from the copy on the phone straight away, then bring it up to date —
+  // on a weak signal the server can take a while, or not answer at all.
+  const hadCopy = loadLocal(user);
+  if (hadCopy) { netStatus(); render(); refresh(); }
+  else await refresh();
+  loadMeals().catch(() => {});                              // in the background: the Pantry tab's
                                                             // "use it up" strip needs the week
-  initPush().then(() => { if (tab === "plan") render(); }); // in the background — never gates the UI
+  initPush().then(() => { if (tab === "plan") render(); }).catch(() => {}); // never gates the UI
   restoreCookAlong();                                       // ditto: dinner may already be in progress
 }
 
 async function boot() {
-  const me = await api("/me");
-  needsInvite = !!(me && me.needsInvite);
-  if (me && me.user) await startApp();
+  let last = null;
+  try { last = localStorage.getItem(LAST_USER_KEY); } catch {}
+  // Someone was logged in on this phone and their copy is here: open on it
+  // now, and check the session behind it rather than in front of it.
+  let hasCopy = false;
+  try { hasCopy = !!(last && localStorage.getItem(LOCAL_KEY(last))); } catch {}
+  if (hasCopy) {
+    startApp(last);
+    let who;
+    try { who = await apiT("/me"); } catch { return; } // no signal: the copy is all there is
+    needsInvite = !!(who && who.needsInvite);
+    if (!who || !who.user) { me = null; showAuth(); }
+    else if (who.user !== last) startApp(who.user);
+    return;
+  }
+  let who = null;
+  try { who = await apiT("/me"); }
+  catch { authErr = "Can't reach the server. Log in once with a signal and the list will work offline after that."; }
+  needsInvite = !!(who && who.needsInvite);
+  if (who && who.user) await startApp(who.user);
   else showAuth();
 }
 
@@ -3311,7 +3580,16 @@ if (themeBtn) themeBtn.onclick = () => {
 };
 
 const logoutBtn = $("#logout");
-if (logoutBtn) logoutBtn.onclick = async () => { await api("/logout", { method: "POST" }); authMode = "login"; showAuth(); };
+if (logoutBtn) logoutBtn.onclick = async () => {
+  if (outbox.length) await flushList();
+  const n = pendingChanges(outbox);
+  if (n && !confirm(`${n} list change${n === 1 ? " hasn't" : "s haven't"} reached the server yet (no signal). Log out and lose ${n === 1 ? "it" : "them"}?`)) return;
+  try { await apiT("/logout", { method: "POST" }); } catch {}
+  // Logging out also takes this account's copy off the phone.
+  if (me) forgetLocal(me);
+  me = null; list = []; pantry = []; saved = []; outbox = []; offline = false; netStatus();
+  authMode = "login"; showAuth();
+};
 
 boot();
 

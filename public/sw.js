@@ -1,10 +1,10 @@
 // Bump CACHE when the app shell changes so clients pick up the new version.
-const CACHE = "pantry-v8";
+const CACHE = "pantry-v9";
 // The lib modules are ES imports from index.html, so a cold offline start needs
 // them cached alongside the page itself. test/client.test.js keeps this in sync.
 const SHELL = ["/", "/index.html", "/manifest.webmanifest", "/icon.svg",
   "/lib/units.js", "/lib/expiry.js", "/lib/pantry.js", "/lib/recipes.js",
-  "/lib/durations.js", "/lib/cookalong.js", "/lib/waste.js"];
+  "/lib/durations.js", "/lib/cookalong.js", "/lib/waste.js", "/lib/offline.js", "/lib/aisles.js"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -65,13 +65,22 @@ self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET") return;
 
   // App shell: network-first so updates land, falling back to cache offline.
-  e.respondWith(
-    fetch(e.request)
-      .then((res) => {
+  // "Offline" in a store is often one bar that neither loads nor fails, so if
+  // the network hasn't answered in 3 s the cached copy is served instead — the
+  // fetch carries on in the background and refreshes the cache for next time.
+  e.respondWith((async () => {
+    const net = fetch(e.request).then((res) => {
+      if (res.ok) {
         const copy = res.clone();
         caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
-        return res;
-      })
-      .catch(() => caches.match(e.request).then((r) => r || caches.match("/index.html")))
-  );
+      }
+      return res;
+    });
+    const cached = (await caches.match(e.request)) ||
+      (e.request.mode === "navigate" ? await caches.match("/index.html") : undefined);
+    if (!cached) return net.catch(() => caches.match("/index.html"));
+    e.waitUntil(net.catch(() => {}));
+    const slow = new Promise((r) => setTimeout(() => r(null), 3000));
+    return (await Promise.race([net.catch(() => null), slow])) || cached;
+  })());
 });

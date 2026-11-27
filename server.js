@@ -16,6 +16,7 @@ import { planShoppingList, estimateListCost } from "./lib/shopping.js";
 import { findDuplicateRecipe } from "./lib/recipes.js";
 import { expiryDigest, DIGEST_HOUR } from "./lib/waste.js";
 import { readBackup, planRestore, describeRestore, BACKUP_VERSION } from "./lib/backup.js";
+import { cleanOps } from "./lib/offline.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -203,6 +204,12 @@ function migrate() {
   for (const t of ["pantry", "list", "recipes"]) {
     if (!columns(t).includes("user_id")) db.exec(`ALTER TABLE ${t} ADD COLUMN user_id INTEGER DEFAULT 0`);
   }
+  // list: the id a phone gave an item it added while offline (see lib/offline.js).
+  // Unique per account, so a sync batch that's sent twice can't add it twice.
+  if (!columns("list").includes("client_id")) db.exec(`ALTER TABLE list ADD COLUMN client_id TEXT DEFAULT ''`);
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS list_client_id ON list(user_id, client_id) WHERE client_id <> ''`);
+  // list: the store section someone moved an item to; '' = use the guess from lib/aisles.js
+  if (!columns("list").includes("section")) db.exec(`ALTER TABLE list ADD COLUMN section TEXT DEFAULT ''`);
 }
 migrate();
 
@@ -378,19 +385,62 @@ app.delete("/api/list/:id", requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// Move bought list rows into the pantry (packages * pkg_base each), then drop them from the list.
+function moveToPantry(userId, rows) {
+  for (const b of rows) {
+    const addBase = +(b.packages * b.pkg_base).toFixed(2);
+    db.prepare("INSERT INTO pantry (name,base,base_unit,pkg_label,pkg_base,added,storage,shelf_life,user_id) VALUES (?,?,?,?,?,?,?,?,?)")
+      .run(b.name, addBase, b.base_unit, b.pkg_label, b.pkg_base, Date.now(), "", "", userId);
+    db.prepare("DELETE FROM list WHERE id=? AND user_id=?").run(b.id, userId);
+  }
+}
+
 // move all checked list items into pantry (adds packages * pkg_base to stock), then clear them
 app.post("/api/purchase", requireAuth, (req, res) => {
   const bought = db.prepare("SELECT * FROM list WHERE checked=1 AND user_id=?").all(req.userId);
-  const tx = db.transaction(() => {
-    for (const b of bought) {
-      const addBase = +(b.packages * b.pkg_base).toFixed(2);
-      db.prepare("INSERT INTO pantry (name,base,base_unit,pkg_label,pkg_base,added,storage,shelf_life,user_id) VALUES (?,?,?,?,?,?,?,?,?)")
-        .run(b.name, addBase, b.base_unit, b.pkg_label, b.pkg_base, Date.now(), "", "", req.userId);
-    }
-    db.prepare("DELETE FROM list WHERE checked=1 AND user_id=?").run(req.userId);
-  });
-  tx();
+  db.transaction(() => moveToPantry(req.userId, bought))();
   res.json({ ok: true, moved: bought.length });
+});
+
+// The phone's outbox of list changes, made while it may have been offline (see
+// lib/offline.js). Applied in order, in one transaction, and answered with the
+// whole list as it now stands. Every op is safe to apply twice: an add carries
+// the phone's own id, and a set/delete/purchase on a row that's gone does
+// nothing — so when a reply is lost and the phone sends the batch again, the
+// list comes out the same. A purchase only moves the rows it names, not
+// whatever another device has ticked in the meantime.
+app.post("/api/list/sync", requireAuth, (req, res) => {
+  const ops = cleanOps(req.body && req.body.ops);
+  if (!ops) return res.status(400).json({ error: "ops must be a list" });
+  const uid = req.userId;
+  const find = (ref) => typeof ref === "number"
+    ? db.prepare("SELECT * FROM list WHERE id=? AND user_id=?").get(ref, uid)
+    : db.prepare("SELECT * FROM list WHERE client_id=? AND user_id=?").get(ref, uid);
+  let moved = 0;
+  db.transaction(() => {
+    for (const o of ops) {
+      if (o.op === "add") {
+        if (find(o.ref)) continue;
+        db.prepare("INSERT INTO list (name,packages,base_unit,pkg_label,pkg_base,checked,user_id,client_id,section) VALUES (?,?,?,?,?,0,?,?,?)")
+          .run(o.name, o.packages, o.base_unit, o.pkg_label, o.pkg_base, uid, o.ref, o.section);
+      } else if (o.op === "set") {
+        const row = find(o.ref);
+        if (!row) continue;
+        db.prepare("UPDATE list SET packages=?, checked=?, section=? WHERE id=?")
+          .run(o.packages ?? row.packages, o.checked ?? row.checked, o.section ?? row.section ?? "", row.id);
+      } else if (o.op === "delete") {
+        const row = find(o.ref);
+        if (row) db.prepare("DELETE FROM list WHERE id=?").run(row.id);
+      } else if (o.op === "purchase") {
+        const byId = new Map();
+        for (const r of o.refs.map(find)) if (r && r.checked) byId.set(r.id, r); // one row, named twice, moves once
+        const rows = [...byId.values()];
+        moveToPantry(uid, rows);
+        moved += rows.length;
+      }
+    }
+  })();
+  res.json({ ok: true, moved, list: db.prepare("SELECT * FROM list WHERE user_id=? ORDER BY id").all(uid) });
 });
 
 // subtract cooked recipe usage (in base units) from pantry stock, oldest batch first
