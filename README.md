@@ -386,6 +386,26 @@ one-time download on the phone itself:
 
 The voice panel says so when the best voice on the phone is a robotic one.
 
+### Natural voice (optional, OpenAI)
+
+Phones only let web apps use their basic voices, so the best-sounding option
+is a voice made on the server. Add **`OPENAI_API_KEY`** to Railway's Variables
+(the OpenAI account needs credit) and cook mode reads steps in a natural voice
+by default; **🎙 Voice** switches between it and the phone's own voice and picks
+from OpenAI's voices (Coral by default).
+
+- `GET /api/tts?t=<text>&v=<voice>` turns a step into an MP3 with
+  `gpt-4o-mini-tts`. Each clip is saved in `tts-cache/` next to the database
+  (on the Railway volume when `DB_PATH` points there), keyed by its exact text
+  and voice, so a step is paid for once. Roughly 1–3¢ for a whole recipe the
+  first time it's read; nothing after that.
+- The next step is fetched while the current one plays, so **Next** doesn't wait.
+- No signal, no key, OpenAI out of credit, or anything else failing: the phone's
+  own voice reads instead. After OpenAI refuses a request (bad key, no credit,
+  rate limit) the server stops asking for 5 minutes, so the fallback is instant.
+- Safety net: at most `TTS_DAILY_LIMIT` (default 300) new clips per account per day.
+- Optional: `OPENAI_TTS_VOICE` (default `coral`), `OPENAI_TTS_MODEL` (default `gpt-4o-mini-tts`).
+
 ## Link fetching from protected sites (optional)
 
 The app fetches recipe links directly by default. That works on most food blogs,

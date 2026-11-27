@@ -3,7 +3,7 @@ import Database from "better-sqlite3";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import crypto from "crypto";
-import { readFileSync } from "fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync } from "fs";
 
 // Logic shared with the browser — see lib/units.js. Served at /lib below so the
 // front end runs the exact same code rather than a second copy of the rules.
@@ -18,6 +18,7 @@ import { findDuplicateRecipe } from "./lib/recipes.js";
 import { expiryDigest, DIGEST_HOUR } from "./lib/waste.js";
 import { readBackup, planRestore, describeRestore, BACKUP_VERSION } from "./lib/backup.js";
 import { cleanOps } from "./lib/offline.js";
+import { speakable } from "./lib/speech.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -1914,6 +1915,85 @@ const jsonText = (v, fallback) => {
   if (v == null || v === "") return fallback;
   return typeof v === "string" ? v : JSON.stringify(v);
 };
+
+// ---------- natural voice (OpenAI text-to-speech) ----------
+// Phones only let web apps use their basic voices, which sound robotic. With
+// OPENAI_API_KEY set, cook mode's "read steps aloud" plays a natural voice
+// made here instead: GET /api/tts?t=<step text>&v=<voice> answers with an MP3.
+// Each clip is saved to disk (next to the database, so on Railway it lives on
+// the volume) and keyed by its exact text and voice, so a step is only ever
+// paid for once. The phone falls back to its own voice if this fails.
+const OPENAI_BASE = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
+const TTS_MODEL = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
+const TTS_VOICES = ["coral", "nova", "sage", "shimmer", "ballad", "alloy", "ash", "echo", "fable", "onyx", "verse"];
+const TTS_VOICE = TTS_VOICES.includes(process.env.OPENAI_TTS_VOICE) ? process.env.OPENAI_TTS_VOICE : "coral";
+const TTS_INSTRUCTIONS =
+  "You're reading one step of a recipe to someone cooking in their kitchen. Speak warmly and clearly, " +
+  "at a relaxed, natural pace, like a friend reading it out for them. Say numbers and measurements naturally.";
+const TTS_DAILY_LIMIT = Number(process.env.TTS_DAILY_LIMIT) || 300; // new clips per account per day
+const TTS_DIR = join(dirname(DB_PATH), "tts-cache");
+const ttsInflight = new Map();  // clip key -> promise, so two requests for one step make one clip
+const ttsToday = new Map();     // userId -> { day, n }
+// After OpenAI turns us away (bad key, out of credit, rate limit), stop asking
+// for a few minutes: the phone then falls back to its own voice at once
+// instead of waiting on a doomed request for every step.
+let ttsPausedUntil = 0;
+
+app.get("/api/tts/status", requireAuth, (req, res) =>
+  res.json({ enabled: !!process.env.OPENAI_API_KEY, voices: TTS_VOICES, voice: TTS_VOICE }));
+
+async function makeClip(text, voice, file) {
+  const r = await fetch(`${OPENAI_BASE}/audio/speech`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "content-type": "application/json" },
+    body: JSON.stringify({ model: TTS_MODEL, voice, input: text, instructions: TTS_INSTRUCTIONS, response_format: "mp3" }),
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!r.ok) {
+    const detail = (await r.text().catch(() => "")).slice(0, 300);
+    if (r.status === 401 || r.status === 403 || r.status === 429) ttsPausedUntil = Date.now() + 5 * 60 * 1000;
+    throw new Error(`OpenAI speech ${r.status}: ${detail}`);
+  }
+  const buf = Buffer.from(await r.arrayBuffer());
+  if (!buf.length) throw new Error("OpenAI speech returned no audio");
+  mkdirSync(TTS_DIR, { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, buf);
+  renameSync(tmp, file); // never leave a half-written clip under the real name
+}
+
+app.get("/api/tts", requireAuth, async (req, res) => {
+  if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: "natural voice is off (no OPENAI_API_KEY)" });
+  const text = speakable(String(req.query.t || "")).slice(0, 2000);
+  if (!text) return res.status(400).json({ error: "nothing to read" });
+  const voice = TTS_VOICES.includes(req.query.v) ? req.query.v : TTS_VOICE;
+  const key = crypto.createHash("sha256").update([TTS_MODEL, voice, TTS_INSTRUCTIONS, text].join("\n")).digest("hex");
+  const file = join(TTS_DIR, `${key}.mp3`);
+  // sendFile answers byte-range requests, which Safari insists on for audio.
+  const send = () => res.sendFile(file, { maxAge: "365d", immutable: true, headers: { "Content-Type": "audio/mpeg" } });
+  if (existsSync(file)) return send();
+  if (Date.now() < ttsPausedUntil) return res.status(503).json({ error: "natural voice paused — check the OpenAI account" });
+
+  let job = ttsInflight.get(key), started = false;
+  if (!job) {
+    started = true;
+    const day = new Date().toISOString().slice(0, 10);
+    const used = ttsToday.get(req.userId);
+    const n = used && used.day === day ? used.n : 0;
+    if (n >= TTS_DAILY_LIMIT) return res.status(429).json({ error: "daily natural-voice limit reached" });
+    ttsToday.set(req.userId, { day, n: n + 1 });
+    job = makeClip(text, voice, file).finally(() => ttsInflight.delete(key));
+    ttsInflight.set(key, job);
+  }
+  try { await job; }
+  catch (e) {
+    console.error("[tts]", e.message);
+    const used = ttsToday.get(req.userId);
+    if (started && used && used.n > 0) used.n--; // a clip that failed doesn't count against the day
+    return res.status(502).json({ error: "couldn't make the voice clip" });
+  }
+  send();
+});
 
 app.get("/api/version", (_, res) => { res.setHeader("Cache-Control", "no-store"); res.json({ version: VERSION }); });
 
