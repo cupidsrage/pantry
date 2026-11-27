@@ -222,6 +222,7 @@ import { planCookAlong, mergeIngredients, cookItems } from "/lib/cookalong.js";
 import { expiryDigest } from "/lib/waste.js";
 import { applyOps, cleanOps, newRef, pendingChanges } from "/lib/offline.js";
 import { SECTIONS, groupBySection, sectionOf } from "/lib/aisles.js";
+import { speakable, chunks, rankVoices, scoreVoice } from "/lib/speech.js";
 
 const $ = (s, el=document) => el.querySelector(s);
 const api = (p, opt) => fetch("/api" + p, opt).then(r => r.json());
@@ -1679,10 +1680,65 @@ async function syncWakeLock() {
 // back when it returns (if still cooking).
 document.addEventListener("visibilitychange", () => syncWakeLock());
 
+// Which voice, and how fast. "" = the best one installed (lib/speech.js ranks
+// them: natural/premium voices first, novelty voices never). Per phone.
+const VOICE_KEY = "pantry.voice";
+let voicePrefs = (() => {
+  try { return { voice: "", rate: 0.95, ...JSON.parse(localStorage.getItem(VOICE_KEY) || "{}") }; }
+  catch { return { voice: "", rate: 0.95 }; }
+})();
+let voiceList = [], voicePanelOpen = false;
+const speechLang = () => navigator.language || "en-US";
+function loadVoices() { if (canSpeak) voiceList = rankVoices(speechSynthesis.getVoices(), speechLang()); }
+if (canSpeak) {
+  loadVoices();
+  // Voices arrive late (Chrome, Safari): rank them again when they do.
+  const onVoices = () => { loadVoices(); if (voicePanelOpen) render(); };
+  if (speechSynthesis.addEventListener) speechSynthesis.addEventListener("voiceschanged", onVoices);
+  else speechSynthesis.onvoiceschanged = onVoices;
+}
+const pickVoice = () => voiceList.find(v => v.name === voicePrefs.voice) || voiceList[0] || null;
+function saveVoicePrefs() { try { localStorage.setItem(VOICE_KEY, JSON.stringify(voicePrefs)); } catch {} }
+
 function say(text) {
   if (!canSpeak) return;
   speechSynthesis.cancel();
-  speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+  if (!voiceList.length) loadVoices();
+  const v = pickVoice();
+  // "1 1/2 tsp" → "1 and a half teaspoons", then one sentence per utterance:
+  // Chrome cuts a long utterance off after ~15 s.
+  for (const part of chunks(speakable(text))) {
+    const u = new SpeechSynthesisUtterance(part);
+    if (v) { try { u.voice = v; u.lang = v.lang; } catch {} } // a voice uninstalled mid-session: use the default
+    u.rate = voicePrefs.rate;
+    speechSynthesis.speak(u);
+  }
+  if (speechSynthesis.paused) speechSynthesis.resume(); // Chrome can leave the queue paused
+}
+const VOICE_SAMPLE = "Preheat the oven to 350°F. Whisk 1 1/2 cups flour with 1/2 tsp salt, then bake 25-30 min.";
+
+function voicePanel() {
+  const best = voiceList[0];
+  const natural = best && scoreVoice(best, speechLang()) >= 40;
+  const ios = /iPhone|iPad|iPod|Macintosh/.test(navigator.userAgent) && "ontouchend" in document;
+  const tip = natural ? "" : `<p class="meta" style="margin-top:8px;line-height:1.45">${ios
+    ? "For a much more natural voice: iPhone Settings → Accessibility → Spoken Content → Voices → English, and download an <b>Enhanced</b> or <b>Premium</b> voice (Ava, Zoe or Evan sound best). Then come back and pick it here."
+    : "For a much more natural voice: Android Settings → search \"Text-to-speech\" → set the engine to <b>Speech Services by Google</b> and download the voice data. Then come back and pick it here."}</p>`;
+  const opt = v => `<option value="${esc(v.name)}" ${voicePrefs.voice === v.name ? "selected" : ""}>${scoreVoice(v, speechLang()) >= 40 ? "★ " : ""}${esc(v.name)} (${esc(v.lang)})</option>`;
+  return `<div style="margin:0 0 12px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:12px">
+    <label class="meta" style="display:block;font-weight:600;margin-bottom:4px">Voice</label>
+    <select id="voicePick" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:14px">
+      <option value="" ${voicePrefs.voice ? "" : "selected"}>Best available${best ? ` — ${esc(best.name)}` : ""}</option>
+      ${voiceList.map(opt).join("")}
+    </select>
+    <label class="meta" style="display:flex;align-items:center;gap:10px;margin-top:10px">
+      <span style="font-weight:600">Speed</span>
+      <input id="voiceRate" type="range" min="0.7" max="1.3" step="0.05" value="${voicePrefs.rate}" style="flex:1">
+      <span id="voiceRateLabel" style="width:38px;text-align:right">${voicePrefs.rate.toFixed(2)}×</span>
+    </label>
+    <button class="btn btn-sky" id="voiceTest" style="width:auto;padding:6px 14px;font-size:13px;margin-top:10px">▶ Test</button>
+    ${tip}
+  </div>`;
 }
 function syncSpeech() {
   if (!canSpeak) return;
@@ -1700,8 +1756,10 @@ function cookAidsBar() {
     ${canSpeak ? `
       <button class="ic" id="readAloudToggle" aria-pressed="${readAloud}" style="${chip};cursor:pointer;${readAloud ? "border-color:var(--accent);color:var(--accent-ink);font-weight:600" : ""}">
         🔊 Read steps aloud: ${readAloud ? "on" : "off"}</button>
-      ${speakTarget ? `<button class="ic" id="readAgain" style="${chip};cursor:pointer">↻ Read this step</button>` : ""}` : ""}
-  </div>`;
+      ${speakTarget ? `<button class="ic" id="readAgain" style="${chip};cursor:pointer">↻ Read this step</button>` : ""}
+      <button class="ic" id="voiceSettings" aria-expanded="${voicePanelOpen}" style="${chip};cursor:pointer">🎙 Voice</button>` : ""}
+  </div>
+  ${canSpeak && voicePanelOpen ? voicePanel() : ""}`;
 }
 
 function cookModeView() {
@@ -2769,6 +2827,14 @@ function wire() {
     render();
   };
   const rag = $("#readAgain"); if (rag) rag.onclick = () => { if (speakTarget) say(speakTarget.text); };
+  const vset = $("#voiceSettings"); if (vset) vset.onclick = () => { voicePanelOpen = !voicePanelOpen; loadVoices(); render(); };
+  const vpick = $("#voicePick"); if (vpick) vpick.onchange = () => { voicePrefs.voice = vpick.value; saveVoicePrefs(); say(VOICE_SAMPLE); };
+  const vrate = $("#voiceRate"); if (vrate) {
+    // Update the label in place while dragging; a full redraw would drop the slider.
+    vrate.oninput = () => { voicePrefs.rate = +vrate.value; const l = $("#voiceRateLabel"); if (l) l.textContent = `${voicePrefs.rate.toFixed(2)}×`; };
+    vrate.onchange = () => { saveVoicePrefs(); say(VOICE_SAMPLE); };
+  }
+  const vtest = $("#voiceTest"); if (vtest) vtest.onclick = () => say(VOICE_SAMPLE);
 
   const scaleItems = () => viewing.ingredients.map(i => ({ ...i, use_base: i.use_base * servings }));
   const rtl = $("#rToList"); if (rtl) rtl.onclick = () => addToList(scaleItems());

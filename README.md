@@ -367,6 +367,23 @@ reach it, using the phone's own voice, so you don't need to touch the screen
 with messy hands. **↻ Read this step** says it again. The setting is remembered
 on that phone.
 
+Recipe shorthand is rewritten into what a person would say before it's read
+(`lib/speech.js`): "1 1/2 cups" → "1 and a half cups", "1/2 tsp" → "half a
+teaspoon", "350°F" → "350 degrees", "25-30 min" → "25 to 30 minutes". Steps are
+read a sentence at a time, because Chrome cuts off a single long utterance.
+
+**🎙 Voice** picks the voice and speed. Left on "Best available", the app
+chooses the most natural voice installed — natural/premium/enhanced voices
+first, the phone's novelty voices never. The best voices usually need a
+one-time download on the phone itself:
+
+- **iPhone:** Settings → Accessibility → Spoken Content → Voices → English →
+  download an *Enhanced* or *Premium* voice (Ava, Zoe or Evan).
+- **Android:** Settings → Text-to-speech → engine *Speech Services by Google*,
+  and install its voice data.
+
+The voice panel says so when the best voice on the phone is a robotic one.
+
 ## Link fetching from protected sites (optional)
 
 The app fetches recipe links directly by default. That works on most food blogs,
