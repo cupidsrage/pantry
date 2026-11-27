@@ -320,7 +320,52 @@ The app is a Progressive Web App — no app store needed.
 
 **Android (Chrome):** open your Railway URL, tap the ⋮ menu, then "Install app" (or "Add to Home Screen").
 
-It then launches full-screen from your home screen with its own icon. Your data lives on the server, so it's the same list across every device you install it on. Needs an internet connection to load and sync (the shell is cached for fast open, but the pantry/list data is always live from the server).
+It then launches full-screen from your home screen with its own icon. Your data lives on the server, so it's the same list across every device you install it on. The phone keeps its own copy too, so the app opens and the list works without a signal (see below).
+
+## The list without signal
+
+Stores are where phone signal is worst, so the grocery list doesn't need it.
+The list, pantry and saved recipes are kept on the phone as well
+(`localStorage`, per account; recipe photos are left out to stay small). Every
+change to the list — ticking, quantities, deleting, adding a recipe's
+ingredients, "mark as purchased" — shows at once and waits in an outbox, then
+goes to `POST /api/list/sync` as soon as the server answers. A strip under the
+tabs says when you're offline and how many changes are waiting.
+
+- **Weak signal counts as none.** Requests give up after a few seconds, and the
+  service worker serves the cached app if the network hasn't answered in 3 s,
+  so one bar doesn't leave you staring at a blank screen.
+- **Opening the app offline works** once you've logged in on that phone with a
+  signal at least once.
+- **Sending a batch twice is harmless.** An item added offline carries the
+  phone's own id (`client_id`), so if the reply is lost and the phone sends the
+  batch again, nothing is added twice and nothing is bought twice.
+- **"Mark as purchased" moves only what that phone ticked**, not something
+  another device ticked in the meantime. Bought items reach the pantry when the
+  sync lands.
+- Logging out takes the copy off the phone; if changes haven't synced yet it
+  asks first.
+
+The rules — applying a change, cleaning what a phone sends — are in
+`lib/offline.js`, shared by the page and the server.
+
+## Store sections
+
+The list is grouped by where things are in a store — produce, bakery, meat,
+dairy, pantry, baking & spices, snacks, drinks, frozen, household — in the
+order you'd walk it. The section is worked out on the phone from the item's
+name (`lib/aisles.js`), so it's free and works offline. If it's wrong for your
+store, tap **⇅** on the item and pick another; that's saved on the item, and
+the phone remembers it for the next time that item is added.
+
+## Hands-free cooking
+
+While cook mode or a cook-together session is on screen, the phone's screen
+stays on (the Screen Wake Lock API — Chrome on Android, Safari on iOS 16.4+),
+and lets go as soon as you leave. **🔊 Read steps aloud** reads each step as you
+reach it, using the phone's own voice, so you don't need to touch the screen
+with messy hands. **↻ Read this step** says it again. The setting is remembered
+on that phone.
 
 ## Link fetching from protected sites (optional)
 
