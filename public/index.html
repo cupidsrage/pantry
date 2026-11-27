@@ -117,6 +117,10 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html { background: var(--bg); }
   body { font-family: ui-sans-serif, system-ui, sans-serif; color: var(--text); min-height: 100vh; }
+  .boot-msg { text-align: center; color: var(--muted); font-size: 14px; padding: 40px 0; line-height: 1.8; }
+  .boot-late { opacity: 0; animation: boot-late 0s 5s forwards; }
+  .boot-late a { color: var(--accent-ink); }
+  @keyframes boot-late { to { opacity: 1; } }
   .net-status { font-size: 12px; line-height: 1.4; color: var(--text-2); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 10px; padding: 7px 10px; margin: 0 0 12px; }
   /* Four fixed layers of atmosphere, all pointer-transparent, all switched off
      by the daylight theme setting their images to none. */
@@ -187,6 +191,12 @@
     <h1>Pantry &amp; List</h1>
     <button id="themeBtn" class="theme-btn" title="Switch theme" aria-label="Switch theme">🦇</button>
   </div>
+
+  <!-- Shown until the script starts. If it never does (a broken update, a
+       file that didn't load), a way out appears after a few seconds instead
+       of a blank screen. "?fresh" makes the service worker go to the network. -->
+  <div id="bootMsg" class="boot-msg">Loading…<br>
+    <span class="boot-late">Taking too long? <a href="/?fresh=1">Tap here to reload</a>.</span></div>
 
   <!-- Login / signup screen (shown until authenticated) -->
   <div id="auth" style="display:none"></div>
@@ -3587,6 +3597,8 @@ async function startApp(user) {
 }
 
 async function boot() {
+  const bm = $("#bootMsg"); if (bm) bm.remove();
+  if (/[?&]fresh=/.test(location.search)) history.replaceState(null, "", "/");
   let last = null;
   try { last = localStorage.getItem(LAST_USER_KEY); } catch {}
   // Someone was logged in on this phone and their copy is here: open on it

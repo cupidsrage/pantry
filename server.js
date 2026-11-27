@@ -22,14 +22,36 @@ import { cleanOps } from "./lib/offline.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json({ limit: "25mb" })); // photos arrive as base64 in the body
-app.use("/lib", express.static(join(__dirname, "lib")));
 
 // Changes on every deploy, so an open app can tell it's out of date and reload.
 // Railway sets the commit; anywhere else, the moment this server started.
 const VERSION = (process.env.RAILWAY_GIT_COMMIT_SHA || "").slice(0, 7) || `dev-${Date.now().toString(36)}`;
+
+// The page and the /lib modules it imports are fetched separately, and the
+// service worker can answer any of them from its cache. A new page next to an
+// old cached module fails to start at all ("binding not found"). So every
+// import is sent out tagged with this version: a page only ever loads the
+// modules it shipped with, and a cached page finds its own in the cache.
+const stampImports = (src) =>
+  src.replace(/(from\s*")((?:\/lib\/|\.\/)[\w-]+\.js)(")/g, `$1$2?v=${VERSION}$3`);
+const libCache = new Map();
+app.get("/lib/:file", (req, res, next) => {
+  const file = req.params.file;
+  if (!/^[\w-]+\.js$/.test(file)) return next();
+  let src = libCache.get(file);
+  if (src === undefined) {
+    try { src = stampImports(readFileSync(join(__dirname, "lib", file), "utf8")); } catch { return next(); }
+    libCache.set(file, src);
+  }
+  res.setHeader("Cache-Control", "no-cache");
+  res.type("application/javascript").send(src);
+});
+app.use("/lib", express.static(join(__dirname, "lib")));
+
 // The page is stamped with the version it came from, so even a copy the
 // service worker served from its cache knows how old it is.
-const INDEX_HTML = readFileSync(join(__dirname, "public", "index.html"), "utf8").replaceAll("__APP_VERSION__", VERSION);
+const INDEX_HTML = stampImports(readFileSync(join(__dirname, "public", "index.html"), "utf8"))
+  .replaceAll("__APP_VERSION__", VERSION);
 app.get(["/", "/index.html"], (_, res) => {
   res.setHeader("Cache-Control", "no-cache");
   res.type("html").send(INDEX_HTML);
