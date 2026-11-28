@@ -285,32 +285,45 @@ totals, your biggest-spend items, and per-item price changes — compared by uni
 price, so buying two of something doesn't read as a price hike. Items with no
 price are still added to the pantry; they just don't count toward spending.
 
-## Theme
+## Look & settings
 
-The app ships in **Dracula**: near-black under a flickering candlelit glow,
-blood crimson, candle-lit violet, cobwebs in the top corners, film grain over
-everything, and blood running off a small-caps serif title. The tabs and the
-copy change with it — the pantry is the **Cellar**, saved recipes are the
-**Grimoire**, the list is the **Hunt**, the week is **Nights**, and parsing a
-recipe bleeds it.
+The ⚙️ button beside the title opens **Settings**, where each choice applies as
+you make it and is remembered on that phone (`localStorage`; nothing about the
+look is stored on the server, so each phone/browser picks its own):
 
-The 🦇 button beside the title switches to **Daylight**: the original palette
-*and* the original wording, unchanged. The choice is remembered per device in
-`localStorage` (nothing is stored server-side, so each phone/browser picks its
-own).
+- **Theme** — Dark, Light, or Match phone (follows the phone's dark mode).
+- **Accent colour** — the theme's own, or crimson, green, blue, violet, orange,
+  pink. Each is tuned for both themes and tested for readable contrast.
+- **Text size** — Small to Huge. The whole page scales, and its width shrinks
+  to match, so nothing runs off the side of the screen.
+- **Wording** — Plain, or Spooky: the pantry is the **Cellar**, saved recipes
+  the **Grimoire**, the list the **Hunt**, the week **Nights**, and parsing a
+  recipe bleeds it. Independent of the theme.
+- **Decorations** — dripping title, cobwebs, film grain, candle flicker and glow.
+- **Tab bar** at the bottom (in reach of your thumb, the default) or the top;
+  which tabs show, in what order; which tab the app opens on (or the last used).
+- **Spacing** (comfortable/compact), **bigger buttons**, **reduce motion**,
+  **ask before deleting**, **vibrate when ticking**.
+- **Shopping list** — group by store section, move ticked items to the bottom,
+  show Walmart links.
+- **Account** — backup and restore, reset settings, log out.
 
-Two mechanisms, both in `public/index.html`:
+On the list, each row keeps the tick, the name (tap it to tick) and − / +;
+store section, Walmart and remove are behind **⋯**.
 
-- **Colour** goes through CSS custom properties, and a theme is one block of
-  values — `:root` holds Dracula, `:root[data-theme="daylight"]` holds the
-  original. The atmosphere (drips, cobwebs, grain, glow, button glow) is in
-  there too, as image tokens the daylight block sets to `none`, so it costs
-  nothing to turn off. Animation is skipped under `prefers-reduced-motion`.
+How it's built:
+
+- `lib/prefs.js` holds the defaults, the accent palettes and
+  `normalizePrefs()`, which turns whatever is stored into a complete, valid set
+  — so an old or broken value can't break the page. The old one-switch theme
+  (`pantry.theme`) is carried over the first time.
+- **Colour** goes through CSS custom properties: `:root` holds the dark theme,
+  `:root[data-theme="daylight"]` the light one, and a chosen accent overrides
+  the accent tokens. The other settings are attributes on `<html>`
+  (`data-density`, `data-big`, `data-decor`, `data-motion`, `data-tabs`) with
+  CSS for each, and text size is a `--zoom` factor.
 - **Copy** goes through `G(gothic, plain)`, which picks a voice based on the
-  current theme. Any string that should change with the theme is wrapped in it.
-
-To retint the app, change the token values; to add a third theme, copy a block
-and give it a new `data-theme` name.
+  Wording setting. Any string with a spooky version is wrapped in it.
 
 ## Install on your phone (PWA)
 
