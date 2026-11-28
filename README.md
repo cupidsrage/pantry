@@ -291,12 +291,19 @@ The ⚙️ button beside the title opens **Settings**, where each choice applies
 you make it and is remembered on that phone (`localStorage`; nothing about the
 look is stored on the server, so each phone/browser picks its own):
 
-- **Theme** — Dark, Light, or Match phone (follows the phone's dark mode).
+- **Theme** — Dark, Light, Auto (follows the phone's dark mode), or
+  **🎄 Christmas**: evergreen and cranberry with gold, a string of twinkling
+  lights under the title, snow falling behind the cards, and Santa's sleigh and
+  reindeer flying across the top every so often. Choosing it also switches the
+  wording to *Festive* (Santa's List, Larder, Cookbook, Feasts, Village) and
+  leaving it switches back. From 20 November to 6 January a small card offers
+  the theme, once a season. The lights, snow and sleigh follow the
+  Decorations and Reduce motion settings.
 - **Accent colour** — the theme's own, or crimson, green, blue, violet, orange,
   pink. Each is tuned for both themes and tested for readable contrast.
 - **Text size** — Small to Huge. The whole page scales, and its width shrinks
   to match, so nothing runs off the side of the screen.
-- **Wording** — Plain, or Spooky: the pantry is the **Cellar**, saved recipes
+- **Wording** — Plain, Festive, or Spooky: the pantry is the **Cellar**, saved recipes
   the **Grimoire**, the list the **Hunt**, the week **Nights**, and parsing a
   recipe bleeds it. Independent of the theme.
 - **Decorations** — dripping title, cobwebs, film grain, candle flicker and glow.
